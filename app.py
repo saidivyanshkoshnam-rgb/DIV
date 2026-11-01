@@ -6,12 +6,14 @@ import json
 import os
 import re
 import secrets
+import struct
 import time
 import threading
 import urllib.request
 import urllib.error
 from urllib.parse import urlencode
 import zipfile
+import zlib
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -217,7 +219,7 @@ def clean_extracted_text(text):
     text = re.sub(r'[\$\(\)\[\]\{\}]', '', text)
     text = re.sub(r'[|&]', '\n', text)
     text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
-    
+
     cleaned_lines = []
     for line in text.splitlines():
         line = re.sub(r'\s+', ' ', line).strip()
@@ -233,7 +235,7 @@ def parse_image(filename, mime, encoded):
         job = client.doc_ai.parse(file=[(filename, BytesIO(raw), mime)], language="en-IN", output_format="md")
     except Exception:
         job = client.doc_ai.parse(file=[(filename, BytesIO(raw), mime)], language="en-IN")
-        
+
     terminal = {"completed", "partially_completed", "failed", "rejected"}
     state = "failed"
     for _ in range(40):
@@ -242,14 +244,14 @@ def parse_image(filename, mime, encoded):
         if state in terminal:
             break
         time.sleep(1.5)
-        
+
     if state not in {"completed", "partially_completed"}:
         raise ValueError("Could not extract text from this image. Try pasting the text directly.")
-        
+
     link = client.doc_ai.get_download_url(job_id=job.job_id)
     with urllib.request.urlopen(link.url, timeout=30) as response:
         archive = zipfile.ZipFile(BytesIO(response.read()))
-        
+
     raw_text = ""
     md = next((name for name in archive.namelist() if name.endswith(".md")), None)
     if md:
@@ -292,6 +294,24 @@ def extract_time_and_clean_title(text):
         return clean_title or text.strip(), time_str
     return text.strip(), ""
 
+
+def make_icon_png(size=192, rgb=(0x58, 0x47, 0xD8)):
+    """Generate a plain solid-colour PNG so the PWA manifest icon resolves."""
+    def chunk(tag, body):
+        crc = zlib.crc32(tag + body) & 0xFFFFFFFF
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", crc)
+    row = b"\x00" + bytes(rgb) * size
+    raw = row * size
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+
+
+ICON_PNG = make_icon_png()
+
 MANIFEST_JSON = '''{
   "name": "DIV Study Assistant",
   "short_name": "DIV",
@@ -320,9 +340,6 @@ self.addEventListener('message', event => {
 
 function checkSwReminders() {
   let now = new Date();
-  let hh = String(now.getHours()).padStart(2, '0');
-  let mm = String(now.getMinutes()).padStart(2, '0');
-  let currentTime = hh + ':' + mm;
   let currentDate = now.toISOString().slice(0, 10);
 
   swTasks.forEach((task, idx) => {
@@ -334,7 +351,7 @@ function checkSwReminders() {
       if (diff >= 0 && diff <= 5) {
         self.registration.showNotification('\u23f0 DIV Study Reminder', {
           body: task.title + (task.time ? ' \u2014 Scheduled for ' + task.time : '') + '\nOpen DIV to see your AI tip.',
-          tag: 'div-sw-' + idx,
+          tag: 'div-task-' + idx,
           requireInteraction: true,
           vibrate: [300, 100, 300, 100, 300]
         });
@@ -347,10 +364,10 @@ function checkSwReminders() {
   });
 }
 
-// Check every 30 seconds — service worker runs even when tab is minimized
+// Check every 30 seconds (browsers may suspend this when the app is idle)
 setInterval(checkSwReminders, 30000);
 
-// Tap on notification → bring app to foreground
+// Tap on notification -> bring app to foreground
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   event.waitUntil(
@@ -387,8 +404,9 @@ body{font:16px system-ui,sans-serif;background:var(--bg);color:var(--text);margi
 <div class="card">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
     <h2 style="margin:0">Today's Timeline & Tasks</h2>
-    <button id="notifBtn" class="secondary" style="font-size:12px;padding:4px 8px;margin:0" onclick="requestNotifPermission()">🔔 Enable Reminders</button>
+    <button id="notifBtn" type="button" class="secondary" style="font-size:12px;padding:4px 8px;margin:0" onclick="requestNotifPermission()">🔔 Enable Reminders</button>
   </div>
+  <p id="notifNote" class="hint" style="margin:0 0 8px"></p>
   <div class="row" style="margin-bottom:8px;flex-wrap:wrap">
     <input id="task" placeholder="Task description" style="flex:2;min-width:160px">
     <input id="taskTime" type="time" title="Set timeline reminder time" style="max-width:125px">
@@ -416,7 +434,7 @@ body{font:16px system-ui,sans-serif;background:var(--bg);color:var(--text);margi
 let currentData = {subjects:[], topics:[], tasks:[], daily_log:[]};
 function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem('divTheme',theme);el('themeToggle').textContent=theme==='dark'?'Switch to light mode':'Switch to dark mode'}
 function toggleTheme(){applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark')}
-async function authenticate(action){let username=el('username').value.trim(),password=el('password').value;try{let result=await api('/api/'+action,{username,password});el('authMessage').textContent='';el('password').value='';el('currentUsername').textContent=result.username;el('loginPanel').hidden=true;el('dashboard').hidden=false;refresh()}catch(e){el('authMessage').textContent=e.message}}
+async function authenticate(action){let username=el('username').value.trim(),password=el('password').value;try{let result=await api('/api/'+action,{username,password});el('authMessage').textContent='';el('password').value='';el('currentUsername').textContent=result.username;el('loginPanel').hidden=true;el('dashboard').hidden=false;updateNotifButton();refresh()}catch(e){el('authMessage').textContent=e.message}}
 async function startApp(){try{let user=await api('/api/me');el('currentUsername').textContent=user.username;el('loginPanel').hidden=true;el('dashboard').hidden=false;updateNotifButton();refresh()}catch(e){el('dashboard').hidden=true;el('loginPanel').hidden=false}}
 async function logout(){await api('/api/logout',{});el('dashboard').hidden=true;el('loginPanel').hidden=false;el('password').value='';el('authMessage').textContent='You are signed out.'}
 async function api(path,body){let r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});let j=await r.json();if(!r.ok)throw Error(j.error||'Something went wrong');return j}
@@ -440,33 +458,70 @@ function playChime(){
   }catch(e){}
 }
 
+function notifSupported(){return 'Notification' in window}
+
+function setNotifNote(msg){let n=el('notifNote');if(n)n.textContent=msg||''}
+
 function updateNotifButton(){
   let btn=el('notifBtn');
   if(!btn) return;
-  if(!('Notification' in window)){
-    btn.textContent='🔔 No browser alerts';
-    btn.disabled=true;
+  btn.disabled=false;
+  btn.style.borderColor='';
+  btn.style.color='';
+  if(!window.isSecureContext){
+    btn.textContent='🔔 Needs HTTPS';
+    setNotifNote('Browser notifications only work on https:// or localhost. In-app banners and chimes still work.');
+  } else if(!notifSupported()){
+    btn.textContent='🔔 Not supported';
+    setNotifNote('This browser has no notification support. On iPhone/iPad, add DIV to your Home Screen first (Share → Add to Home Screen), then open it from there.');
   } else if(Notification.permission==='granted'){
     btn.textContent='🔔 Reminders active';
     btn.style.borderColor='#4caf50';
     btn.style.color='#4caf50';
+    setNotifNote('');
   } else if(Notification.permission==='denied'){
     btn.textContent='🔕 Reminders blocked';
+    setNotifNote('Notifications are blocked for this site. Click the lock icon in the address bar → Site settings → Notifications → Allow, then reload the page.');
   } else {
     btn.textContent='🔔 Enable Reminders';
+    setNotifNote('');
   }
 }
 
+// Works on desktop AND Android (where `new Notification()` throws)
+async function showNotif(title, options){
+  if(!notifSupported() || Notification.permission!=='granted') return false;
+  try{
+    if('serviceWorker' in navigator){
+      let reg=await navigator.serviceWorker.getRegistration();
+      if(reg){ await reg.showNotification(title, options); return true; }
+    }
+  }catch(e){}
+  try{ new Notification(title, options); return true; }catch(e){ return false; }
+}
+
 async function requestNotifPermission(){
-  if(!('Notification' in window)){
-    alert('Browser notifications are not supported in this browser, but in-app banners and audio chimes will still alert you!');
+  updateNotifButton();
+  if(!window.isSecureContext || !notifSupported()) return;
+  if(Notification.permission==='denied') return;
+  if(Notification.permission==='granted'){
+    playChime();
+    let ok=await showNotif('DIV Reminders Active',{body:'Test notification — reminders are working!'});
+    if(!ok) setNotifNote('Permission is granted but the browser refused to show a notification. Check your OS Do Not Disturb / Focus settings.');
     return;
   }
-  let p=await Notification.requestPermission();
+  let perm;
+  try{
+    // Supports both promise-based and older callback-based browsers (Safari)
+    perm=await new Promise(resolve=>{
+      let r=Notification.requestPermission(resolve);
+      if(r && typeof r.then==='function') r.then(resolve);
+    });
+  }catch(e){ perm=Notification.permission; }
   updateNotifButton();
-  if(p==='granted'){
+  if(perm==='granted'){
     playChime();
-    new Notification('DIV Reminders Active', {body: 'You will receive reminder notifications at scheduled times!'});
+    await showNotif('DIV Reminders Active',{body:'You will receive reminder notifications at scheduled times!'});
   }
 }
 
@@ -481,14 +536,12 @@ function triggerReminder(task, origIdx){
   task.notified=true;
   api('/api/task/notified',{index:origIdx}).catch(()=>{});
   playChime();
-  if('Notification' in window && Notification.permission==='granted'){
-    try{
-      new Notification('⏰ DIV Study Reminder', {
-        body: task.title + (task.time ? ` (Scheduled for ${task.time})` : ''),
-        tag: 'div-task-'+origIdx
-      });
-    }catch(e){}
-  }
+  showNotif('⏰ DIV Study Reminder', {
+    body: task.title + (task.time ? ` (Scheduled for ${task.time})` : ''),
+    tag: 'div-task-'+origIdx,
+    requireInteraction: true,
+    vibrate: [300,100,300]
+  });
   let banner=el('reminderBanner');
   if(banner){
     el('reminderBannerText').innerHTML=`⏰ <b>Timeline Reminder (${esc(task.time||'Now')}):</b> ${esc(task.title)}`;
@@ -576,7 +629,7 @@ async function refresh(){
   let active=selector.value,visible=d.topics.map((t,i)=>({t,i})).filter(x=>active==='__all'||x.t.subject===active);
   el('subjectCaption').textContent=active==='__all'?'All subjects':active;
   el('topics').innerHTML=visible.map(x=>topicNode(x.t,[x.i])).join('')||'<p class="hint">No chapters for this subject yet. Add a chapter above.</p>';
-  
+
   let todayTasks=d.tasks.map((t,origIdx)=>({...t,origIdx})).filter(t=>t.day===d.today);
   todayTasks.sort((a,b)=>{
     if(a.time && b.time) return a.time.localeCompare(b.time);
@@ -597,7 +650,7 @@ async function refresh(){
       <button class="secondary" style="font-size:12px;padding:3px 7px;margin:0" onclick="removeTask(${t.origIdx})" title="Delete task">✕</button>
     </div>`;
   }).join('')+(hasCompleted?`<button class="secondary" style="font-size:13px;width:100%;margin-top:8px" onclick="clearCompletedTasks()">Clear completed tasks</button>`:'')||'<p class="hint">No tasks scheduled for today yet.</p>';
-  
+
   let counts=topicCounts(visible.map(x=>x.t));
   el('progress').textContent=`${counts.done} of ${counts.total} items completed`;
   el('logs').innerHTML=d.daily_log.slice(-3).reverse().map(x=>`<div class="item"><b>${esc(x.day)}</b> ${esc(x.text)}</div>`).join('');
@@ -628,8 +681,8 @@ async function addTask(){
   el('task').value='';
   if(el('taskTime')) el('taskTime').value='';
   refresh();
-  if('Notification' in window && Notification.permission==='default'){
-    Notification.requestPermission().then(updateNotifButton);
+  if(window.isSecureContext && notifSupported() && Notification.permission==='default'){
+    requestNotifPermission();
   }
 }
 async function removeTask(index){await api('/api/task/remove',{index});refresh()}
@@ -892,6 +945,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+        elif self.path == "/icon.png":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(ICON_PNG)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(ICON_PNG)
         else:
             self.send_json({"error": "Not found"}, 404)
 
@@ -1045,7 +1105,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not topics:
                     raise ValueError("Paste your topics or add chapters first.")
                 topic_list = "\n".join(f"- {topic}" for topic in topics)
-                
+
                 weak_prompt = ""
                 if weak:
                     weak_prompt = (
@@ -1054,7 +1114,7 @@ class Handler(BaseHTTPRequestHandler):
                         f"- YOU MUST prioritize these weak areas: allocate extra time/days, breakdown core fundamentals step-by-step, assign double practice problems, and schedule repeated spaced review specifically for them.\n"
                         f"- Explicitly indicate in the daily focus/outcome that special remedial attention is being given to these weak areas.\n"
                     )
-                
+
                 system_content = (
                     "You are DIV, an expert academic planner and tutor. Create a structured, rigorous day-by-day study schedule covering the topics provided.\n"
                     "CRITICAL RULES:\n"
@@ -1070,7 +1130,7 @@ class Handler(BaseHTTPRequestHandler):
                     "5. Respect logical prerequisites."
                     + weak_prompt
                 )
-                
+
                 user_content = f"Days available: {days}\nTopics to cover:\n{topic_list}"
                 if weak:
                     user_content += f"\n\nStudent weakness note: {weak}"
