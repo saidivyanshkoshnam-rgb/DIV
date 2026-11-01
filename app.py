@@ -549,6 +549,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", os.environ.get("STUDY_DAY_PORT", "8765")))
-    host = os.environ.get("HOST", "127.0.0.1")
+    host = os.environ.get("HOST", "0.0.0.0")
     print(f"Study & Day is ready on {host}:{port}")
     ThreadingHTTPServer((host, port), Handler).serve_forever()
