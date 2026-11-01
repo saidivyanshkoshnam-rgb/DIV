@@ -199,6 +199,32 @@ def pending_topic_titles(topics):
     return pending
 
 
+def clean_latex(text):
+    if not text:
+        return ""
+    # Convert double-backslash line breaks to newlines
+    text = re.sub(r'\\\\', '\n', text)
+    # Remove \begin{...} and \end{...} blocks
+    text = re.sub(r'\\(begin|end)\{[^}]*\}', '', text)
+    # Extract text from \text{...}, \textbf{...}, \textit{...}, etc.
+    text = re.sub(r'\\(?:text|textbf|textit|mathrm|mathbf|emph|underline)\{([^}]*)\}', r'\1', text)
+    # Remove remaining LaTeX commands like \hline, \quad, etc.
+    text = re.sub(r'\\[a-zA-Z]+', ' ', text)
+    # Replace table column dividers with newlines or spaces
+    text = re.sub(r'[|&]', '\n', text)
+    # Remove math delimiters and stray braces
+    text = re.sub(r'[\$\(\)\[\]\{\}]', '', text)
+    # Clean whitespace and strip empty lines
+    cleaned_lines = []
+    for line in text.splitlines():
+        line = re.sub(r'\s+', ' ', line).strip()
+        # Remove bullet markers
+        line = re.sub(r'^[-*•]\s*', '', line).strip()
+        if line and len(line) > 1 and not line.startswith('#'):
+            cleaned_lines.append(line)
+    return '\n'.join(cleaned_lines)
+
+
 def parse_image(filename, mime, encoded):
     raw = base64.b64decode(encoded)
     try:
@@ -222,24 +248,27 @@ def parse_image(filename, mime, encoded):
     with urllib.request.urlopen(link.url, timeout=30) as response:
         archive = zipfile.ZipFile(BytesIO(response.read()))
         
+    raw_text = ""
     md = next((name for name in archive.namelist() if name.endswith(".md")), None)
     if md:
-        return archive.read(md).decode("utf-8", errors="ignore")
-        
-    for name in archive.namelist():
-        if name.endswith((".txt", ".html")):
-            return archive.read(name).decode("utf-8", errors="ignore")
-            
-    for name in archive.namelist():
-        if name.endswith(".json") and not name.startswith("manifest"):
-            try:
-                data = json.loads(archive.read(name).decode("utf-8", errors="ignore"))
-                if isinstance(data, dict):
-                    if "text" in data: return data["text"]
-                    if "content" in data: return data["content"]
-            except Exception:
-                pass
-    return ""
+        raw_text = archive.read(md).decode("utf-8", errors="ignore")
+    else:
+        for name in archive.namelist():
+            if name.endswith((".txt", ".html")):
+                raw_text = archive.read(name).decode("utf-8", errors="ignore")
+                break
+        if not raw_text:
+            for name in archive.namelist():
+                if name.endswith(".json") and not name.startswith("manifest"):
+                    try:
+                        data = json.loads(archive.read(name).decode("utf-8", errors="ignore"))
+                        if isinstance(data, dict):
+                            raw_text = data.get("text", "") or data.get("content", "")
+                            if raw_text: break
+                    except Exception:
+                        pass
+
+    return clean_latex(raw_text)
 
 
 PAGE = r'''<!doctype html>
@@ -369,6 +398,19 @@ let recorder, chunks=[];async function record(){if(recorder&&recorder.state==='r
 
 function fileToBase64(file){return new Promise((resolve,reject)=>{let r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(file)})}
 
+function cleanClientText(t){
+  return t.replace(/\\\\/g,'\n')
+          .replace(/\\(begin|end)\{[^}]*\}/g,'')
+          .replace(/\\(?:text|textbf|textit|mathrm|mathbf|emph|underline)\{([^}]*)\}/g,'$1')
+          .replace(/\\[a-zA-Z]+/g,' ')
+          .replace(/[|&]/g,'\n')
+          .replace(/[\$\(\)\[\]\{\}]/g,'')
+          .split('\n')
+          .map(l=>l.replace(/^[-*•\d.)\s]+/,'').trim())
+          .filter(l=>l.length>1)
+          .join('\n');
+}
+
 async function readImage(){
   let f=el('image').files[0];
   if(!f){alert('Please select an image or PDF first.');return}
@@ -376,10 +418,10 @@ async function readImage(){
   try{
     let base64=await fileToBase64(f);
     let r=await api('/api/image',{filename:f.name,mime:f.type||'image/png',data:base64});
-    let text=(r.text||'').trim();
-    el('preview').innerHTML='<p>Review or edit the text, then select where to save:</p><textarea id="parsed" style="min-height:120px">'+esc(text)+'</textarea><select id="importType"><option value="topics">Topics</option><option value="tasks">Today’s tasks</option></select><button onclick="saveParsed()">Save to list</button>';
+    let text=cleanClientText(r.text||'');
+    el('preview').innerHTML='<p>Review or edit your extracted topics below:</p><textarea id="parsed" style="min-height:140px">'+esc(text)+'</textarea><div class="row"><button class="secondary" type="button" onclick="el(\'parsed\').value=cleanClientText(el(\'parsed\').value)">Clean LaTeX formatting</button></div><select id="importType"><option value="topics">Topics</option><option value="tasks">Today’s tasks</option></select><button onclick="saveParsed()">Save to list</button>';
   }catch(e){
-    el('preview').innerHTML='<p class="hint" style="color:#d9534f">Image scan failed ('+esc(e.message)+'). You can paste your topics directly below:</p><textarea id="parsed" style="min-height:120px" placeholder="Art and Culture&#10;Indian History&#10;World History"></textarea><select id="importType"><option value="topics">Topics</option><option value="tasks">Today’s tasks</option></select><button onclick="saveParsed()">Save to list</button>';
+    el('preview').innerHTML='<p class="hint" style="color:#d9534f">Scan failed ('+esc(e.message)+'). You can paste your topics directly below:</p><textarea id="parsed" style="min-height:140px" placeholder="Art and Culture&#10;Indian History&#10;World History"></textarea><select id="importType"><option value="topics">Topics</option><option value="tasks">Today’s tasks</option></select><button onclick="saveParsed()">Save to list</button>';
   }
 }
 
