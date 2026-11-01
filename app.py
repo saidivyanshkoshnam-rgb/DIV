@@ -76,7 +76,13 @@ def user_data_path(user_id):
 def normalize_data(data):
     for key, value in DEFAULT_DATA.items():
         data.setdefault(key, copy.deepcopy(value))
+    def ensure_node(item):
+        item.setdefault("children", [])
+        item.setdefault("done", False)
+        for child in item["children"]:
+            ensure_node(child)
     for topic in data["topics"]:
+        ensure_node(topic)
         if not topic.get("subject"):
             topic["subject"] = "General"
         if topic["subject"] not in data["subjects"]:
@@ -195,21 +201,45 @@ def pending_topic_titles(topics):
 
 def parse_image(filename, mime, encoded):
     raw = base64.b64decode(encoded)
-    job = client.doc_ai.parse(file=[(filename, BytesIO(raw), mime)], language="en-IN")
+    try:
+        job = client.doc_ai.parse(file=[(filename, BytesIO(raw), mime)], language="en-IN", output_format="md")
+    except Exception:
+        job = client.doc_ai.parse(file=[(filename, BytesIO(raw), mime)], language="en-IN")
+        
     terminal = {"completed", "partially_completed", "failed", "rejected"}
-    for _ in range(60):
+    state = "failed"
+    for _ in range(40):
         status = client.doc_ai.get_status(job_id=job.job_id)
         state = status.status.lower()
         if state in terminal:
             break
-        time.sleep(2)
+        time.sleep(1.5)
+        
     if state not in {"completed", "partially_completed"}:
-        raise ValueError("Sarvam could not read that image. Try a clearer image.")
+        raise ValueError("Could not extract text from this image. Try pasting the text directly.")
+        
     link = client.doc_ai.get_download_url(job_id=job.job_id)
     with urllib.request.urlopen(link.url, timeout=30) as response:
         archive = zipfile.ZipFile(BytesIO(response.read()))
+        
     md = next((name for name in archive.namelist() if name.endswith(".md")), None)
-    return archive.read(md).decode("utf-8") if md else ""
+    if md:
+        return archive.read(md).decode("utf-8", errors="ignore")
+        
+    for name in archive.namelist():
+        if name.endswith((".txt", ".html")):
+            return archive.read(name).decode("utf-8", errors="ignore")
+            
+    for name in archive.namelist():
+        if name.endswith(".json") and not name.startswith("manifest"):
+            try:
+                data = json.loads(archive.read(name).decode("utf-8", errors="ignore"))
+                if isinstance(data, dict):
+                    if "text" in data: return data["text"]
+                    if "content" in data: return data["content"]
+            except Exception:
+                pass
+    return ""
 
 
 PAGE = r'''<!doctype html>
@@ -223,7 +253,7 @@ body{font:16px system-ui,sans-serif;background:var(--bg);color:var(--text);margi
 <script>window.MathJax={tex:{inlineMath:[["\\(","\\)"],["$","$" ]],displayMath:[["\\[","\\]"],["$$","$$"]]},options:{skipHtmlTags:["script","noscript","style","textarea","pre","code"]}};</script><script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <div class="grid"><section>
 <div class="card"><h2>Chat with DIV</h2><div id="messages"></div><textarea id="message" placeholder="Ask DIV anything, or try: add task: revise notes"></textarea><div class="row"><button onclick="send()">Send</button><button class="secondary" onclick="record()" id="record">🎙 Record voice</button><label class="hint"><input id="speak" type="checkbox" style="width:auto"> Speak replies</label></div><input id="audio" type="file" accept="audio/*" hidden><audio id="player" controls hidden></audio></div>
-<div class="card"><h2>Add topics or tasks from an image</h2><p class="hint">Create a subject for each list. Chapters and subtopics stay grouped under the selected subject. Checking an item marks it completed.</p><div class="row"><input id="newSubject" placeholder="New subject, e.g. Physics"><button onclick="addSubject()">Add subject</button></div><div class="row"><input id="topic" placeholder="Chapter name"><button onclick="addTopic()">Add chapter</button></div><input id="image" type="file" accept="image/png,image/jpeg,.pdf"><button class="secondary" onclick="readImage()">Read image/PDF</button><div id="preview"></div></div>
+<div class="card"><h2>Add topics or tasks from an image</h2><p class="hint">Upload a syllabus photo, or paste your topics directly in the box.</p><div class="row"><input id="newSubject" placeholder="New subject, e.g. Paper 1"><button onclick="addSubject()">Add subject</button></div><div class="row"><input id="topic" placeholder="Chapter name"><button onclick="addTopic()">Add chapter</button></div><input id="image" type="file" accept="image/png,image/jpeg,.pdf"><button class="secondary" onclick="readImage()">Read image/PDF</button><div id="preview"></div></div>
 </section><aside>
 <div class="card"><h2>Today's tasks</h2><div class="row"><input id="task" placeholder="What do you need to do?"><button onclick="addTask()">Add</button></div><div id="tasks"></div></div>
 <div class="card"><h2>Topic checklist</h2><label for="subjectSelect">Subject</label><select id="subjectSelect" onchange="selectSubject()"></select><p id="subjectCaption" class="hint"></p><div id="topics"></div><p id="progress" class="hint"></p></div>
@@ -231,6 +261,7 @@ body{font:16px system-ui,sans-serif;background:var(--bg);color:var(--text);margi
 <div class="card"><h2>Log today's work</h2><textarea id="work" placeholder="What did you work on today?"></textarea><button onclick="logWork()">Save daily log</button><div id="logs"></div></div>
 </aside></div></div></main>
 <script>
+let currentData = {subjects:[], topics:[], tasks:[], daily_log:[]};
 function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem('divTheme',theme);el('themeToggle').textContent=theme==='dark'?'Switch to light mode':'Switch to dark mode'}
 function toggleTheme(){applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark')}
 async function authenticate(action){let username=el('username').value.trim(),password=el('password').value;try{let result=await api('/api/'+action,{username,password});el('authMessage').textContent='';el('password').value='';el('currentUsername').textContent=result.username;el('loginPanel').hidden=true;el('dashboard').hidden=false;refresh()}catch(e){el('authMessage').textContent=e.message}}
@@ -239,9 +270,42 @@ async function logout(){await api('/api/logout',{});el('dashboard').hidden=true;
 async function api(path,body){let r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});let j=await r.json();if(!r.ok)throw Error(j.error||'Something went wrong');return j}
 function el(id){return document.getElementById(id)}
 function addMsg(text,who='assistant'){let d=document.createElement('div');d.className='msg '+(who==='user'?'user':'');d.textContent=text;el('messages').appendChild(d);if(who!=='user'&&window.MathJax?.typesetPromise)window.MathJax.typesetPromise([d]);el('messages').scrollTop=el('messages').scrollHeight}
-function topicNode(t,path,ancestorDone=false){let done=ancestorDone||!!t.done,children=t.children||[];return `<div class="topic-node" data-title="${esc(t.title)}"><label><input style="width:auto" type="checkbox" ${done?'checked':''} onchange="toggleTopic(${JSON.stringify(path)},this.checked)"> <span class="${done?'done':''}">${esc(t.title)}</span></label> <small class="hint">${done?'Completed':'To do'}</small><div class="topic-actions">${path.length<3?`<button class="secondary" onclick="addChild(${JSON.stringify(path)})">${path.length===1?'Add subtopic':'Add sub-sub-topic'}</button>`:''}<button class="secondary" onclick="editTopic(${JSON.stringify(path)},this.closest('.topic-node').dataset.title)">Edit</button><button class="secondary" onclick="removeTopic(${JSON.stringify(path)},this.closest('.topic-node').dataset.title)">Remove</button></div>${children.length?`<div class="topic-children">${children.map((c,i)=>topicNode(c,[...path,i],done)).join('')}</div>`:''}</div>`}
+
+function topicNode(t,path,ancestorDone=false){
+  let done=ancestorDone||!!t.done,children=t.children||[];
+  let pathJson=JSON.stringify(path);
+  return `<div class="topic-node">
+    <label><input style="width:auto" type="checkbox" ${done?'checked':''} onchange="toggleTopic(${pathJson},this.checked)"> <span class="${done?'done':''}">${esc(t.title)}</span></label> 
+    <small class="hint">${done?'Completed':'To do'}</small>
+    <div class="topic-actions">
+      ${path.length<3?`<button class="secondary" onclick="addChild(${pathJson})">${path.length===1?'Add subtopic':'Add sub-sub-topic'}</button>`:''}
+      <button class="secondary" onclick="editTopic(${pathJson})">Edit</button>
+      <button class="secondary" onclick="removeTopic(${pathJson})">Remove</button>
+    </div>
+    ${children.length?`<div class="topic-children">${children.map((c,i)=>topicNode(c,[...path,i],done)).join('')}</div>`:''}
+  </div>`;
+}
+
 function topicCounts(topics,ancestorDone=false){let total=0,done=0;for(const t of topics){total++;if(ancestorDone||t.done)done++;const c=topicCounts(t.children||[],ancestorDone||t.done);total+=c.total;done+=c.done}return{total,done}}
-async function refresh(){let d=await api('/api/state'),selector=el('subjectSelect'),previous=localStorage.getItem('activeSubject')||'';selector.innerHTML='<option value="__all">All subjects</option>'+d.subjects.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');selector.value=d.subjects.includes(previous)?previous:(d.subjects[0]||'__all');localStorage.setItem('activeSubject',selector.value);let active=selector.value,visible=d.topics.map((t,i)=>({t,i})).filter(x=>active==='__all'||x.t.subject===active);el('subjectCaption').textContent=active==='__all'?'All subjects':active;el('topics').innerHTML=visible.map(x=>topicNode(x.t,[x.i])).join('')||'<p class="hint">No chapters for this subject yet. Add a chapter above.</p>';let todayTasks=d.tasks.filter(t=>t.day===d.today);let hasCompleted=todayTasks.some(t=>t.done);el('tasks').innerHTML=todayTasks.map(t=>`<div class="item row" style="justify-content:space-between"><label><input style="width:auto" type="checkbox" ${t.done?'checked':''} onchange="toggleTask(${d.tasks.indexOf(t)},this.checked)"> <span class="${t.done?'done':''}">${esc(t.title)}</span></label><button class="secondary" style="font-size:12px;padding:3px 7px;margin:0" onclick="removeTask(${d.tasks.indexOf(t)})" title="Delete task">✕</button></div>`).join('')+(hasCompleted?`<button class="secondary" style="font-size:13px;width:100%;margin-top:8px" onclick="clearCompletedTasks()">Clear completed tasks</button>`:'')||'<p class="hint">No tasks yet.</p>';let counts=topicCounts(visible.map(x=>x.t));el('progress').textContent=`${counts.done} of ${counts.total} items completed`;el('logs').innerHTML=d.daily_log.slice(-3).reverse().map(x=>`<div class="item"><b>${esc(x.day)}</b> ${esc(x.text)}</div>`).join('');el('planOutput').innerHTML=d.plan?`<p class="hint">${d.plan.days}-day plan · ${d.plan.topics.length} topics</p><div class="item" style="white-space:pre-wrap">${esc(d.plan.text)}</div>`:'<p class="hint">Your saved plan will appear here.</p>'}
+
+async function refresh(){
+  let d=await api('/api/state');
+  currentData=d;
+  let selector=el('subjectSelect'),previous=localStorage.getItem('activeSubject')||'';
+  selector.innerHTML='<option value="__all">All subjects</option>'+d.subjects.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  selector.value=d.subjects.includes(previous)?previous:(d.subjects[0]||'__all');
+  localStorage.setItem('activeSubject',selector.value);
+  let active=selector.value,visible=d.topics.map((t,i)=>({t,i})).filter(x=>active==='__all'||x.t.subject===active);
+  el('subjectCaption').textContent=active==='__all'?'All subjects':active;
+  el('topics').innerHTML=visible.map(x=>topicNode(x.t,[x.i])).join('')||'<p class="hint">No chapters for this subject yet. Add a chapter above.</p>';
+  let todayTasks=d.tasks.filter(t=>t.day===d.today);
+  let hasCompleted=todayTasks.some(t=>t.done);
+  el('tasks').innerHTML=todayTasks.map(t=>`<div class="item row" style="justify-content:space-between"><label><input style="width:auto" type="checkbox" ${t.done?'checked':''} onchange="toggleTask(${d.tasks.indexOf(t)},this.checked)"> <span class="${t.done?'done':''}">${esc(t.title)}</span></label><button class="secondary" style="font-size:12px;padding:3px 7px;margin:0" onclick="removeTask(${d.tasks.indexOf(t)})" title="Delete task">✕</button></div>`).join('')+(hasCompleted?`<button class="secondary" style="font-size:13px;width:100%;margin-top:8px" onclick="clearCompletedTasks()">Clear completed tasks</button>`:'')||'<p class="hint">No tasks yet.</p>';
+  let counts=topicCounts(visible.map(x=>x.t));
+  el('progress').textContent=`${counts.done} of ${counts.total} items completed`;
+  el('logs').innerHTML=d.daily_log.slice(-3).reverse().map(x=>`<div class="item"><b>${esc(x.day)}</b> ${esc(x.text)}</div>`).join('');
+  el('planOutput').innerHTML=d.plan?`<p class="hint">${d.plan.days}-day plan · ${d.plan.topics.length} topics</p><div class="item" style="white-space:pre-wrap">${esc(d.plan.text)}</div>`:'<p class="hint">Your saved plan will appear here.</p>';
+}
 
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function selectSubject(){localStorage.setItem('activeSubject',el('subjectSelect').value);refresh()}
@@ -250,18 +314,76 @@ async function addTopic(){let title=el('topic').value.trim(),subject=el('subject
 async function addTask(){let title=el('task').value.trim();if(!title)return;await api('/api/task',{title});el('task').value='';refresh()}
 async function removeTask(index){await api('/api/task/remove',{index});refresh()}
 async function clearCompletedTasks(){await api('/api/task/clear-completed',{});refresh()}
-async function addChild(path){let title=prompt(path.length===1?'Subtopic name':'Sub-sub-topic name');if(!title||!title.trim())return;await api('/api/topic/child',{path,title:title.trim()});refresh()}
-async function editTopic(path,current){let title=prompt('Edit item',current);if(title===null||!title.trim())return;await api('/api/topic/edit',{path,title:title.trim()});refresh()}
-async function removeTopic(path,title){if(!confirm(`Remove "${title}" and all its subtopics?`))return;await api('/api/topic/remove',{path});refresh()}
+
+async function addChild(path){
+  let title=prompt(path.length===1?'Enter subtopic name:':'Enter sub-sub-topic name:');
+  if(!title||!title.trim())return;
+  try{
+    await api('/api/topic/child',{path,title:title.trim()});
+    refresh();
+  }catch(e){
+    alert('Could not add subtopic: '+e.message);
+  }
+}
+
+async function editTopic(path){
+  let current='';
+  try{
+    let item=currentData.topics[path[0]];
+    for(let i=1;i<path.length;i++)item=item.children[path[i]];
+    current=item.title||'';
+  }catch(e){}
+  let title=prompt('Edit topic name:',current);
+  if(title===null||!title.trim())return;
+  try{
+    await api('/api/topic/edit',{path,title:title.trim()});
+    refresh();
+  }catch(e){
+    alert('Could not edit topic: '+e.message);
+  }
+}
+
+async function removeTopic(path){
+  let title='this item';
+  try{
+    let item=currentData.topics[path[0]];
+    for(let i=1;i<path.length;i++)item=item.children[path[i]];
+    title=`"${item.title}"`;
+  }catch(e){}
+  if(!confirm(`Remove ${title} and all its subtopics?`))return;
+  try{
+    await api('/api/topic/remove',{path});
+    refresh();
+  }catch(e){
+    alert('Could not remove: '+e.message);
+  }
+}
+
 async function toggleTopic(path,done){await api('/api/topic/done',{path,done});refresh()}
 async function toggleTask(index,done){await api('/api/task/done',{index,done});refresh()}
 async function logWork(){let text=el('work').value.trim();if(!text)return;await api('/api/log',{text});el('work').value='';refresh()}
 async function makePlan(){let days=Number(el('planDays').value);if(!Number.isInteger(days)||days<1||days>365){addMsg('Enter a number of days from 1 to 365.');return}let topics=el('planTopics').value.split(/\n+/).map(x=>x.trim()).filter(Boolean);el('planOutput').textContent='Building your plan with DIV…';try{let p=await api('/api/plan',{days,topics});el('planOutput').innerHTML=`<p class="hint">${p.days}-day plan · ${p.topics.length} topics</p><div class="item" style="white-space:pre-wrap">${esc(p.text)}</div>`;refresh()}catch(e){el('planOutput').textContent=e.message}}
 async function send(){let message=el('message').value.trim();if(!message)return;el('message').value='';addMsg(message,'user');try{let r=await api('/api/chat',{message,subject:el('subjectSelect').value});addMsg(r.reply);if(el('speak').checked){let a=await api('/api/speak',{text:r.reply.slice(0,2400)});el('player').src='data:audio/wav;base64,'+a.audio;el('player').hidden=false;el('player').play()};refresh()}catch(e){addMsg(e.message)}}
 el('message').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}})
-let recorder, chunks=[];async function record(){if(recorder&&recorder.state==='recording'){recorder.stop();el('record').textContent='🎙 Record voice';return}try{let stream=await navigator.mediaDevices.getUserMedia({audio:true});recorder=new MediaRecorder(stream);chunks=[];recorder.ondataavailable=e=>chunks.push(e.data);recorder.onstop=async()=>{let blob=new Blob(chunks,{type:recorder.mimeType});let data=await blob.arrayBuffer();let bytes=Array.from(new Uint8Array(data));let binary=bytes.map(b=>String.fromCharCode(b)).join('');try{let r=await api('/api/voice',{mime:blob.type,data:btoa(binary)});el('message').value=r.transcript;send()}catch(e){addMsg(e.message)}stream.getTracks().forEach(t=>t.stop())};recorder.start();el('record').textContent='Stop recording'}catch(e){addMsg('Allow microphone access to use voice input.')}}
-async function readImage(){let f=el('image').files[0];if(!f)return;el('preview').textContent='Reading image…';try{let b=await f.arrayBuffer();let binary=Array.from(new Uint8Array(b)).map(x=>String.fromCharCode(x)).join('');let r=await api('/api/image',{filename:f.name,mime:f.type||'application/pdf',data:btoa(binary)});el('preview').innerHTML='<p>Check the extracted text, then choose how to save it.</p><textarea id="parsed">'+esc(r.text)+'</textarea><select id="importType"><option value="topics">Topics</option><option value="tasks">Today’s tasks</option></select><button onclick="saveParsed()">Save</button>'}catch(e){el('preview').textContent=e.message}}
-async function saveParsed(){let kind=el('importType').value,subject=el('subjectSelect').value;if(kind==='topics'&&subject==='__all'){el('preview').textContent='Choose a subject before importing topics.';return}let lines=el('parsed').value.split(/\n+/).map(x=>x.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').trim()).filter(x=>x.length>2&&!/^#+\s/.test(x));await api('/api/import',{items:lines,kind,subject});el('preview').textContent='Saved. You can mark items complete below.';refresh()}
+let recorder, chunks=[];async function record(){if(recorder&&recorder.state==='recording'){recorder.stop();el('record').textContent='🎙 Record voice';return}try{let stream=await navigator.mediaDevices.getUserMedia({audio:true});recorder=new MediaRecorder(stream);chunks=[];recorder.ondataavailable=e=>chunks.push(e.data);recorder.onstop=async()=>{let blob=new Blob(chunks,{type:recorder.mimeType});let reader=new FileReader();reader.onload=async()=>{let base64=reader.result.split(',')[1];try{let r=await api('/api/voice',{mime:blob.type,data:base64});el('message').value=r.transcript;send()}catch(e){addMsg(e.message)}};reader.readAsDataURL(blob);stream.getTracks().forEach(t=>t.stop())};recorder.start();el('record').textContent='Stop recording'}catch(e){addMsg('Allow microphone access to use voice input.')}}
+
+function fileToBase64(file){return new Promise((resolve,reject)=>{let r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(file)})}
+
+async function readImage(){
+  let f=el('image').files[0];
+  if(!f){alert('Please select an image or PDF first.');return}
+  el('preview').innerHTML='<p class="hint">Reading image with Sarvam AI… (takes ~10–15s)</p>';
+  try{
+    let base64=await fileToBase64(f);
+    let r=await api('/api/image',{filename:f.name,mime:f.type||'image/png',data:base64});
+    let text=(r.text||'').trim();
+    el('preview').innerHTML='<p>Review or edit the text, then select where to save:</p><textarea id="parsed" style="min-height:120px">'+esc(text)+'</textarea><select id="importType"><option value="topics">Topics</option><option value="tasks">Today’s tasks</option></select><button onclick="saveParsed()">Save to list</button>';
+  }catch(e){
+    el('preview').innerHTML='<p class="hint" style="color:#d9534f">Image scan failed ('+esc(e.message)+'). You can paste your topics directly below:</p><textarea id="parsed" style="min-height:120px" placeholder="Art and Culture&#10;Indian History&#10;World History"></textarea><select id="importType"><option value="topics">Topics</option><option value="tasks">Today’s tasks</option></select><button onclick="saveParsed()">Save to list</button>';
+  }
+}
+
+async function saveParsed(){let kind=el('importType').value,subject=el('subjectSelect').value;if(kind==='topics'&&subject==='__all'){alert('Choose a specific subject above first.');return}let lines=el('parsed').value.split(/\n+/).map(x=>x.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim()).filter(x=>x.length>1&&!/^#+\s/.test(x));await api('/api/import',{items:lines,kind,subject});el('preview').innerHTML='<p class="hint" style="color:#4caf50">✓ Saved successfully! Look at your checklist below.</p>';refresh()}
 
 applyTheme(localStorage.getItem('divTheme')||'light');
 startApp();
@@ -486,7 +608,7 @@ class Handler(BaseHTTPRequestHandler):
                     data["subjects"].append(subject)
                 for title in request.get("items", []):
                     if title:
-                        item = {"title": title, "done": False}
+                        item = {"title": title, "done": False, "children": []}
                         if target == "topics": item["subject"] = subject
                         if target == "tasks": item["day"] = time.strftime("%Y-%m-%d")
                         data[target].append(item)
