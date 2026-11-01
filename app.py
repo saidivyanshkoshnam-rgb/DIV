@@ -202,28 +202,22 @@ def pending_topic_titles(topics):
 def clean_extracted_text(text):
     if not text:
         return ""
-    # Strip <style> and <script> tags completely along with their CSS contents
     text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<script[\s\S]*?</script>', '', text, flags=re.IGNORECASE)
-    # Convert block tags to line breaks
     text = re.sub(r'</?(?:p|div|h[1-6]|li|tr|br|td|th)[^>]*>', '\n', text, flags=re.IGNORECASE)
-    # Strip all remaining HTML tags
     text = re.sub(r'<[^>]+>', ' ', text)
-    # Strip LaTeX commands and symbols
     text = re.sub(r'\\\\', '\n', text)
     text = re.sub(r'\\(begin|end)\{[^}]*\}', '', text)
     text = re.sub(r'\\(?:text|textbf|textit|mathrm|mathbf|emph|underline)\{([^}]*)\}', r'\1', text)
     text = re.sub(r'\\[a-zA-Z]+', ' ', text)
     text = re.sub(r'[\$\(\)\[\]\{\}]', '', text)
     text = re.sub(r'[|&]', '\n', text)
-    # Unescape HTML entities
     text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
     
     cleaned_lines = []
     for line in text.splitlines():
         line = re.sub(r'\s+', ' ', line).strip()
         line = re.sub(r'^[-*•\d.)\s]+', '', line).strip()
-        # Filter out stray CSS remnants or empty lines
         if line and len(line) > 1 and not any(skip in line for skip in ('!important', 'margin:', 'padding:', '{', '}')):
             cleaned_lines.append(line)
     return '\n'.join(cleaned_lines)
@@ -282,17 +276,31 @@ PAGE = r'''<!doctype html>
 :root{color-scheme:light;--bg:#f5f6fa;--surface:#fff;--text:#202434;--border:#e5e7ef;--muted:#666;--soft:#eef0f8;--soft-text:#282b3b;--line:#eee;--bubble:#f2f2fa;--user-bubble:#e8e5ff;--done:#7d8190}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#151821;--surface:#202530;--text:#eceef6;--border:#394150;--muted:#aab0bd;--soft:#343a4a;--soft-text:#f0f1f7;--line:#353b47;--bubble:#2b3040;--user-bubble:#3b3464;--done:#a0a6b3}
 body{font:16px system-ui,sans-serif;background:var(--bg);color:var(--text);margin:0}main{max-width:980px;margin:32px auto;padding:16px}.grid{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:16px}.page-header{display:flex;align-items:center;justify-content:space-between;gap:12px}.page-header h1{margin-bottom:4px}h1{margin-bottom:4px}h2{font-size:19px;margin-top:0}button{background:#5847d8;color:white;border:0;border-radius:8px;padding:10px 14px;cursor:pointer;margin:4px}button.secondary{background:var(--soft);color:var(--soft-text)}input,textarea,select{font:inherit;padding:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:8px;width:100%;box-sizing:border-box;margin:6px 0}textarea{min-height:76px}.row{display:flex;gap:8px;align-items:center}.row input{flex:1}.item{padding:10px;border-bottom:1px solid var(--line)}.topic-node{padding:8px 4px;border-bottom:1px solid var(--line)}.topic-children{margin-left:20px;border-left:2px solid var(--border);padding-left:10px}.topic-actions button{font-size:12px;padding:6px 9px}.done{text-decoration:line-through;color:var(--done)}.msg{padding:9px 12px;border-radius:10px;background:var(--bubble);margin:8px 0;white-space:pre-wrap}.user{background:var(--user-bubble)}.hint{color:var(--muted);font-size:14px}.auth-card{max-width:440px;margin:48px auto}#authMessage{min-height:22px}#messages{max-height:360px;overflow:auto}@media(max-width:700px){.grid{grid-template-columns:1fr}.page-header{align-items:flex-start;flex-direction:column}}
+.modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:9999}
+.modal-box{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:22px;width:90%;max-width:420px;box-shadow:0 12px 36px rgba(0,0,0,0.3)}
 </style><main><header class="page-header"><h1>DIV</h1><button class="secondary" id="themeToggle" onclick="toggleTheme()">Switch to dark mode</button></header><section id="loginPanel" class="card auth-card" hidden><p class="hint">Sign in to open DIV, or create a new account.</p><label for="username">Username</label><input id="username" autocomplete="username" placeholder="3–32 letters, numbers, or underscores"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters"><div class="row"><button onclick="authenticate('login')">Sign in</button><button class="secondary" onclick="authenticate('register')">Create account</button></div><p id="authMessage" class="hint"></p><p class="hint">Keep your password safe; password recovery is not set up yet.</p></section><div id="dashboard" hidden><div class="row" style="justify-content:flex-end"><span id="currentUsername" class="hint"></span><button class="secondary" onclick="logout()">Sign out</button></div><p class="hint">Welcome to DIV. Add topics and tasks, then ask DIV for help.</p>
 <script>window.MathJax={tex:{inlineMath:[["\\(","\\)"],["$","$" ]],displayMath:[["\\[","\\]"],["$$","$$"]]},options:{skipHtmlTags:["script","noscript","style","textarea","pre","code"]}};</script><script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <div class="grid"><section>
 <div class="card"><h2>Chat with DIV</h2><div id="messages"></div><textarea id="message" placeholder="Ask DIV anything, or try: add task: revise notes"></textarea><div class="row"><button onclick="send()">Send</button><button class="secondary" onclick="record()" id="record">🎙 Record voice</button><label class="hint"><input id="speak" type="checkbox" style="width:auto"> Speak replies</label></div><input id="audio" type="file" accept="audio/*" hidden><audio id="player" controls hidden></audio></div>
-<div class="card"><h2>Add topics or tasks from an image</h2><p class="hint">Upload a syllabus photo, or paste your topics directly in the box.</p><div class="row"><input id="newSubject" placeholder="New subject, e.g. Paper 1"><button onclick="addSubject()">Add subject</button></div><div class="row"><input id="topic" placeholder="Chapter name"><button onclick="addTopic()">Add chapter</button></div><input id="image" type="file" accept="image/png,image/jpeg,.pdf"><button class="secondary" onclick="readImage()">Read image/PDF</button><div id="preview"></div></div>
+<div class="card"><h2>Add topics or tasks from an image</h2><p class="hint">Upload a syllabus photo, or paste your topics directly in the box.</p><div class="row"><input id="newSubject" placeholder="New subject, e.g. Paper 1"><button onclick="addSubject()">Add subject</button></div><div class="row"><input id="topic" placeholder="Chapter or topic name"><button onclick="addTopic()">Add chapter</button></div><input id="image" type="file" accept="image/png,image/jpeg,.pdf"><button class="secondary" onclick="readImage()">Read image/PDF</button><div id="preview"></div></div>
 </section><aside>
 <div class="card"><h2>Today's tasks</h2><div class="row"><input id="task" placeholder="What do you need to do?"><button onclick="addTask()">Add</button></div><div id="tasks"></div></div>
 <div class="card"><h2>Topic checklist</h2><label for="subjectSelect">Subject</label><select id="subjectSelect" onchange="selectSubject()"></select><p id="subjectCaption" class="hint"></p><div id="topics"></div><p id="progress" class="hint"></p></div>
 <div class="card"><h2>Make a plan with DIV</h2><p class="hint">Enter topics on separate lines. Leave blank to plan from your unchecked topics.</p><textarea id="planTopics" placeholder="Paste the topics you need to cover"></textarea><label for="planDays">How many days do you have?</label><input id="planDays" type="number" min="1" max="365" value="7"><button onclick="makePlan()">Create my plan</button><div id="planOutput"></div></div>
 <div class="card"><h2>Log today's work</h2><textarea id="work" placeholder="What did you work on today?"></textarea><button onclick="logWork()">Save daily log</button><div id="logs"></div></div>
 </aside></div></div></main>
+
+<div id="actionModal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3 id="modalHeading" style="margin-top:0">Edit</h3>
+    <input id="modalInputValue" style="margin-bottom:14px" autofocus>
+    <div class="row" style="justify-content:flex-end">
+      <button class="secondary" type="button" onclick="closeInputModal()">Cancel</button>
+      <button type="button" onclick="confirmInputModal()">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let currentData = {subjects:[], topics:[], tasks:[], daily_log:[]};
 function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem('divTheme',theme);el('themeToggle').textContent=theme==='dark'?'Switch to light mode':'Switch to dark mode'}
@@ -304,6 +312,29 @@ async function api(path,body){let r=await fetch(path,{method:body?'POST':'GET',h
 function el(id){return document.getElementById(id)}
 function addMsg(text,who='assistant'){let d=document.createElement('div');d.className='msg '+(who==='user'?'user':'');d.textContent=text;el('messages').appendChild(d);if(who!=='user'&&window.MathJax?.typesetPromise)window.MathJax.typesetPromise([d]);el('messages').scrollTop=el('messages').scrollHeight}
 
+let modalCallback = null;
+function openInputModal(title, val, onConfirm){
+  el('modalHeading').textContent = title;
+  el('modalInputValue').value = val || '';
+  modalCallback = onConfirm;
+  el('actionModal').style.display = 'flex';
+  setTimeout(() => el('modalInputValue').focus(), 50);
+}
+function closeInputModal(){
+  el('actionModal').style.display = 'none';
+  modalCallback = null;
+}
+async function confirmInputModal(){
+  let val = el('modalInputValue').value.trim();
+  if(!val) return;
+  if(modalCallback) await modalCallback(val);
+  closeInputModal();
+}
+el('modalInputValue').addEventListener('keydown', e => {
+  if(e.key === 'Enter') confirmInputModal();
+  if(e.key === 'Escape') closeInputModal();
+});
+
 function topicNode(t,path,ancestorDone=false){
   let done=ancestorDone||!!t.done,children=t.children||[];
   let pathJson=JSON.stringify(path);
@@ -311,9 +342,9 @@ function topicNode(t,path,ancestorDone=false){
     <label><input style="width:auto" type="checkbox" ${done?'checked':''} onchange="toggleTopic(${pathJson},this.checked)"> <span class="${done?'done':''}">${esc(t.title)}</span></label> 
     <small class="hint">${done?'Completed':'To do'}</small>
     <div class="topic-actions">
-      ${path.length<3?`<button class="secondary" onclick="addChild(${pathJson})">${path.length===1?'Add subtopic':'Add sub-sub-topic'}</button>`:''}
-      <button class="secondary" onclick="editTopic(${pathJson})">Edit</button>
-      <button class="secondary" onclick="removeTopic(${pathJson})">Remove</button>
+      ${path.length<3?`<button class="secondary" type="button" onclick="addChild(${pathJson})">${path.length===1?'Add subtopic':'Add sub-sub-topic'}</button>`:''}
+      <button class="secondary" type="button" onclick="editTopic(${pathJson})">Edit</button>
+      <button class="secondary" type="button" onclick="removeTopic(${pathJson})">Remove</button>
     </div>
     ${children.length?`<div class="topic-children">${children.map((c,i)=>topicNode(c,[...path,i],done)).join('')}</div>`:''}
   </div>`;
@@ -343,37 +374,47 @@ async function refresh(){
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function selectSubject(){localStorage.setItem('activeSubject',el('subjectSelect').value);refresh()}
 async function addSubject(){let name=el('newSubject').value.trim();if(!name)return;let r=await api('/api/subject',{name});el('newSubject').value='';localStorage.setItem('activeSubject',r.name);refresh()}
-async function addTopic(){let title=el('topic').value.trim(),subject=el('subjectSelect').value;if(!title)return;if(subject==='__all'){alert('Choose a subject first, or add one above.');return}await api('/api/topic',{title,subject});el('topic').value='';refresh()}
+async function addTopic(){
+  let title=el('topic').value.trim();
+  let subject=el('subjectSelect').value;
+  if(!title) return;
+  if(subject==='__all' || !subject){
+    subject = (currentData.subjects && currentData.subjects[0]) ? currentData.subjects[0] : 'General';
+  }
+  await api('/api/topic',{title,subject});
+  el('topic').value='';
+  refresh();
+}
 async function addTask(){let title=el('task').value.trim();if(!title)return;await api('/api/task',{title});el('task').value='';refresh()}
 async function removeTask(index){await api('/api/task/remove',{index});refresh()}
 async function clearCompletedTasks(){await api('/api/task/clear-completed',{});refresh()}
 
-async function addChild(path){
-  let title=prompt(path.length===1?'Enter subtopic name:':'Enter sub-sub-topic name:');
-  if(!title||!title.trim())return;
-  try{
-    await api('/api/topic/child',{path,title:title.trim()});
-    refresh();
-  }catch(e){
-    alert('Could not add subtopic: '+e.message);
-  }
+function addChild(path){
+  openInputModal(path.length===1?'Add Subtopic':'Add Sub-sub-topic', '', async (title) => {
+    try {
+      await api('/api/topic/child', {path, title});
+      refresh();
+    } catch(e) {
+      alert('Could not add subtopic: ' + e.message);
+    }
+  });
 }
 
-async function editTopic(path){
+function editTopic(path){
   let current='';
   try{
     let item=currentData.topics[path[0]];
     for(let i=1;i<path.length;i++)item=item.children[path[i]];
     current=item.title||'';
   }catch(e){}
-  let title=prompt('Edit topic name:',current);
-  if(title===null||!title.trim())return;
-  try{
-    await api('/api/topic/edit',{path,title:title.trim()});
-    refresh();
-  }catch(e){
-    alert('Could not edit topic: '+e.message);
-  }
+  openInputModal('Edit Topic Name', current, async (title) => {
+    try {
+      await api('/api/topic/edit', {path, title});
+      refresh();
+    } catch(e) {
+      alert('Could not edit topic: ' + e.message);
+    }
+  });
 }
 
 async function removeTopic(path){
@@ -584,7 +625,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/topic":
                 subject = str(request.get("subject", "General")).strip()
                 if not subject or subject == "__all":
-                    raise ValueError("Choose a subject before adding a chapter.")
+                    subject = "General"
                 if subject not in data["subjects"]:
                     data["subjects"].append(subject)
                 data["topics"].append({"title": request["title"], "subject": subject, "done": False, "children": []})
@@ -654,7 +695,7 @@ class Handler(BaseHTTPRequestHandler):
                 target = "tasks" if kind == "tasks" else "topics"
                 subject = str(request.get("subject", "")).strip()
                 if target == "topics" and (not subject or subject == "__all"):
-                    raise ValueError("Choose a subject before importing topics.")
+                    subject = "General"
                 if target == "topics" and subject not in data["subjects"]:
                     data["subjects"].append(subject)
                 for title in request.get("items", []):
