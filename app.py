@@ -18,19 +18,21 @@ from pathlib import Path
 from sarvamai import SarvamAI
 
 ROOT = Path(__file__).parent
-DATA_FILE = ROOT / "data.json"
-ACCOUNTS_FILE = ROOT / "accounts.json"
-USER_DATA_DIR = ROOT / "user_data"
+DATA_DIR = Path(os.environ.get("STUDY_DAY_DATA_DIR", str(ROOT)))
+DATA_FILE = DATA_DIR / "data.json"
+ACCOUNTS_FILE = DATA_DIR / "accounts.json"
+USER_DATA_DIR = DATA_DIR / "user_data"
 REQUEST_CONTEXT = threading.local()
 SESSIONS = {}
 SESSION_LOCK = threading.Lock()
 ACCOUNT_LOCK = threading.Lock()
 SESSION_SECONDS = 7 * 24 * 60 * 60
 KEY_FILE = ROOT / ".env"
-for line in KEY_FILE.read_text(encoding="utf-8-sig").splitlines():
-    name, sep, value = line.partition("=")
-    if sep and name.strip() == "SARVAM_API_KEY" and value.strip():
-        os.environ[name.strip()] = value.strip()
+if KEY_FILE.exists():
+    for line in KEY_FILE.read_text(encoding="utf-8-sig").splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == "SARVAM_API_KEY" and value.strip():
+            os.environ.setdefault(name.strip(), value.strip())
 if not os.environ.get("SARVAM_API_KEY"):
     raise SystemExit("Add SARVAM_API_KEY to .env before starting the app.")
 
@@ -134,7 +136,7 @@ PAGE = r'''<!doctype html>
 :root{color-scheme:light;--bg:#f5f6fa;--surface:#fff;--text:#202434;--border:#e5e7ef;--muted:#666;--soft:#eef0f8;--soft-text:#282b3b;--line:#eee;--bubble:#f2f2fa;--user-bubble:#e8e5ff;--done:#7d8190}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#151821;--surface:#202530;--text:#eceef6;--border:#394150;--muted:#aab0bd;--soft:#343a4a;--soft-text:#f0f1f7;--line:#353b47;--bubble:#2b3040;--user-bubble:#3b3464;--done:#a0a6b3}
 body{font:16px system-ui,sans-serif;background:var(--bg);color:var(--text);margin:0}main{max-width:980px;margin:32px auto;padding:16px}.grid{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:16px}.page-header{display:flex;align-items:center;justify-content:space-between;gap:12px}.page-header h1{margin-bottom:4px}h1{margin-bottom:4px}h2{font-size:19px;margin-top:0}button{background:#5847d8;color:white;border:0;border-radius:8px;padding:10px 14px;cursor:pointer;margin:4px}button.secondary{background:var(--soft);color:var(--soft-text)}input,textarea,select{font:inherit;padding:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:8px;width:100%;box-sizing:border-box;margin:6px 0}textarea{min-height:76px}.row{display:flex;gap:8px;align-items:center}.row input{flex:1}.item{padding:10px;border-bottom:1px solid var(--line)}.topic-node{padding:8px 4px;border-bottom:1px solid var(--line)}.topic-children{margin-left:20px;border-left:2px solid var(--border);padding-left:10px}.topic-actions button{font-size:12px;padding:6px 9px}.done{text-decoration:line-through;color:var(--done)}.msg{padding:9px 12px;border-radius:10px;background:var(--bubble);margin:8px 0;white-space:pre-wrap}.user{background:var(--user-bubble)}.hint{color:var(--muted);font-size:14px}.auth-card{max-width:440px;margin:48px auto}#authMessage{min-height:22px}#messages{max-height:360px;overflow:auto}@media(max-width:700px){.grid{grid-template-columns:1fr}.page-header{align-items:flex-start;flex-direction:column}}
-</style><main><header class="page-header"><h1>Study & Day</h1><button class="secondary" id="themeToggle" onclick="toggleTheme()">Switch to dark mode</button></header><section id="loginPanel" class="card auth-card" hidden><p class="hint">Sign in to open your private study space, or create a new account.</p><label for="username">Username</label><input id="username" autocomplete="username" placeholder="3–32 letters, numbers, or underscores"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters"><div class="row"><button onclick="authenticate('login')">Sign in</button><button class="secondary" onclick="authenticate('register')">Create account</button></div><p id="authMessage" class="hint"></p><p class="hint">Keep your password safe; password recovery is not set up yet.</p></section><div id="dashboard" hidden><div class="row" style="justify-content:flex-end"><span id="currentUsername" class="hint"></span><button class="secondary" onclick="logout()">Sign out</button></div><p class="hint">Your private local study and daily-work tracker. Add topics and tasks, then ask for help.</p>
+</style><main><header class="page-header"><h1>Study & Day</h1><button class="secondary" id="themeToggle" onclick="toggleTheme()">Switch to dark mode</button></header><section id="loginPanel" class="card auth-card" hidden><p class="hint">Sign in to open your private study space, or create a new account.</p><label for="username">Username</label><input id="username" autocomplete="username" placeholder="3–32 letters, numbers, or underscores"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters"><div class="row"><button onclick="authenticate('login')">Sign in</button><button class="secondary" onclick="authenticate('register')">Create account</button></div><p id="authMessage" class="hint"></p><p class="hint">Keep your password safe; password recovery is not set up yet.</p></section><div id="dashboard" hidden><div class="row" style="justify-content:flex-end"><span id="currentUsername" class="hint"></span><button class="secondary" onclick="logout()">Sign out</button></div><p class="hint">Your private study and daily-work tracker. Add topics and tasks, then ask for help.</p>
 <script>window.MathJax={tex:{inlineMath:[["\\(","\\)"],["$","$" ]],displayMath:[["\\[","\\]"],["$$","$$"]]},options:{skipHtmlTags:["script","noscript","style","textarea","pre","code"]}};</script><script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <div class="grid"><section>
 <div class="card"><h2>Chat and subject doubts</h2><div id="messages"></div><textarea id="message" placeholder="Ask a subject question, or try: add task: revise biology"></textarea><div class="row"><button onclick="send()">Send</button><button class="secondary" onclick="record()" id="record">🎙 Record voice</button><label class="hint"><input id="speak" type="checkbox" style="width:auto"> Speak replies</label></div><input id="audio" type="file" accept="audio/*" hidden><audio id="player" controls hidden></audio></div>
@@ -252,7 +254,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"username": username}, extra_headers=headers)
 
     def do_GET(self):
-        if self.path == "/":
+        if self.path == "/healthz":
+            self.send_json({"ok": True})
+        elif self.path == "/":
             payload = PAGE.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -463,6 +467,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("STUDY_DAY_PORT", "8765"))
-    print(f"Study & Day is ready at http://127.0.0.1:{port}")
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    port = int(os.environ.get("PORT", os.environ.get("STUDY_DAY_PORT", "8765")))
+    host = os.environ.get("HOST", "127.0.0.1")
+    print(f"Study & Day is ready on {host}:{port}")
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
