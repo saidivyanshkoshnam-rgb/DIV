@@ -292,7 +292,77 @@ def extract_time_and_clean_title(text):
         return clean_title or text.strip(), time_str
     return text.strip(), ""
 
+MANIFEST_JSON = '''{
+  "name": "DIV Study Assistant",
+  "short_name": "DIV",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f6fa",
+  "theme_color": "#5847d8",
+  "description": "AI-powered study planner with reminders",
+  "icons": [{"src": "/icon.png", "sizes": "192x192", "type": "image/png"}]
+}'''
 
+SW_JS = r"""
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+
+let swTasks = [];
+let swToday = '';
+
+// Receive task list from the main page
+self.addEventListener('message', event => {
+  if (event.data && event.data.type === 'SET_TASKS') {
+    swTasks = event.data.tasks || [];
+    swToday  = event.data.today || '';
+  }
+});
+
+function checkSwReminders() {
+  let now = new Date();
+  let hh = String(now.getHours()).padStart(2, '0');
+  let mm = String(now.getMinutes()).padStart(2, '0');
+  let currentTime = hh + ':' + mm;
+  let currentDate = now.toISOString().slice(0, 10);
+
+  swTasks.forEach((task, idx) => {
+    if (!task.done && !task.swNotified && task.time && task.day === currentDate) {
+      let parts = task.time.split(':').map(Number);
+      let taskMins = parts[0] * 60 + parts[1];
+      let nowMins  = now.getHours() * 60 + now.getMinutes();
+      let diff = nowMins - taskMins;
+      if (diff >= 0 && diff <= 5) {
+        self.registration.showNotification('\u23f0 DIV Study Reminder', {
+          body: task.title + (task.time ? ' \u2014 Scheduled for ' + task.time : '') + '\nOpen DIV to see your AI tip.',
+          tag: 'div-sw-' + idx,
+          requireInteraction: true,
+          vibrate: [300, 100, 300, 100, 300]
+        });
+        task.swNotified = true;
+        self.clients.matchAll().then(clients =>
+          clients.forEach(c => c.postMessage({type: 'SW_NOTIFIED', idx: idx}))
+        );
+      }
+    }
+  });
+}
+
+// Check every 30 seconds — service worker runs even when tab is minimized
+setInterval(checkSwReminders, 30000);
+
+// Tap on notification → bring app to foreground
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({type: 'window', includeUncontrolled: true}).then(clients => {
+      if (clients.length > 0) return clients[0].focus();
+      return self.clients.openWindow('/');
+    })
+  );
+});
+"""
+
+PAGE = r'''<!doctype html>
 PAGE = r'''<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DIV</title>
