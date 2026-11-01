@@ -87,6 +87,10 @@ def normalize_data(data):
             topic["subject"] = "General"
         if topic["subject"] not in data["subjects"]:
             data["subjects"].append(topic["subject"])
+    for task in data.get("tasks", []):
+        task.setdefault("time", "")
+        task.setdefault("done", False)
+        task.setdefault("notified", False)
     return data
 
 
@@ -269,6 +273,26 @@ def parse_image(filename, mime, encoded):
     return clean_extracted_text(raw_text)
 
 
+def extract_time_and_clean_title(text):
+    pattern = r'\b(?:at|by)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b'
+    match = re.search(pattern, text, re.IGNORECASE)
+    if not match:
+        return text.strip(), ""
+    hour = int(match.group(1))
+    minute = int(match.group(2)) if match.group(2) else 0
+    meridiem = (match.group(3) or "").lower()
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        time_str = f"{hour:02d}:{minute:02d}"
+        clean_title = re.sub(pattern, '', text, flags=re.IGNORECASE).strip()
+        clean_title = re.sub(r'\s+', ' ', clean_title).strip(' ,.-')
+        return clean_title or text.strip(), time_str
+    return text.strip(), ""
+
+
 PAGE = r'''<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DIV</title>
@@ -278,15 +302,32 @@ PAGE = r'''<!doctype html>
 body{font:16px system-ui,sans-serif;background:var(--bg);color:var(--text);margin:0}main{max-width:980px;margin:32px auto;padding:16px}.grid{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:16px}.page-header{display:flex;align-items:center;justify-content:space-between;gap:12px}.page-header h1{margin-bottom:4px}h1{margin-bottom:4px}h2{font-size:19px;margin-top:0}button{background:#5847d8;color:white;border:0;border-radius:8px;padding:10px 14px;cursor:pointer;margin:4px}button.secondary{background:var(--soft);color:var(--soft-text)}input,textarea,select{font:inherit;padding:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:8px;width:100%;box-sizing:border-box;margin:6px 0}textarea{min-height:76px}.row{display:flex;gap:8px;align-items:center}.row input{flex:1}.item{padding:10px;border-bottom:1px solid var(--line)}.topic-node{padding:8px 4px;border-bottom:1px solid var(--line)}.topic-children{margin-left:20px;border-left:2px solid var(--border);padding-left:10px}.topic-actions button{font-size:12px;padding:6px 9px}.done{text-decoration:line-through;color:var(--done)}.msg{padding:9px 12px;border-radius:10px;background:var(--bubble);margin:8px 0;white-space:pre-wrap}.user{background:var(--user-bubble)}.hint{color:var(--muted);font-size:14px}.auth-card{max-width:440px;margin:48px auto}#authMessage{min-height:22px}#messages{max-height:360px;overflow:auto}@media(max-width:700px){.grid{grid-template-columns:1fr}.page-header{align-items:flex-start;flex-direction:column}}
 .modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:9999}
 .modal-box{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:22px;width:90%;max-width:420px;box-shadow:0 12px 36px rgba(0,0,0,0.3)}
-</style><main><header class="page-header"><h1>DIV</h1><button class="secondary" id="themeToggle" onclick="toggleTheme()">Switch to dark mode</button></header><section id="loginPanel" class="card auth-card" hidden><p class="hint">Sign in to open DIV, or create a new account.</p><label for="username">Username</label><input id="username" autocomplete="username" placeholder="3–32 letters, numbers, or underscores"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters"><div class="row"><button onclick="authenticate('login')">Sign in</button><button class="secondary" onclick="authenticate('register')">Create account</button></div><p id="authMessage" class="hint"></p><p class="hint">Keep your password safe; password recovery is not set up yet.</p></section><div id="dashboard" hidden><div class="row" style="justify-content:flex-end"><span id="currentUsername" class="hint"></span><button class="secondary" onclick="logout()">Sign out</button></div><p class="hint">Welcome to DIV. Add topics and tasks, then ask DIV for help.</p>
+</style><main><header class="page-header"><h1>DIV</h1><button class="secondary" id="themeToggle" onclick="toggleTheme()">Switch to dark mode</button></header><section id="loginPanel" class="card auth-card" hidden><p class="hint">Sign in to open DIV, or create a new account.</p><label for="username">Username</label><input id="username" autocomplete="username" placeholder="3–32 letters, numbers, or underscores"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters"><div class="row"><button onclick="authenticate('login')">Sign in</button><button class="secondary" onclick="authenticate('register')">Create account</button></div><p id="authMessage" class="hint"></p><p class="hint">Keep your password safe; password recovery is not set up yet.</p></section><div id="dashboard" hidden><div class="row" style="justify-content:flex-end"><span id="currentUsername" class="hint"></span><button class="secondary" onclick="logout()">Sign out</button></div><p class="hint">Welcome to DIV. Add topics and tasks with timelines, then ask DIV for help.</p>
+
+<div id="reminderBanner" style="display:none;background:#5847d8;color:white;padding:12px 18px;border-radius:12px;margin-bottom:16px;box-shadow:0 6px 18px rgba(88,71,216,0.3);justify-content:space-between;align-items:center" class="row">
+  <span id="reminderBannerText" style="font-size:15px">⏰ <b>Reminder:</b></span>
+  <button class="secondary" style="margin:0;padding:5px 12px;font-size:12px;background:rgba(255,255,255,0.2);color:white;border:1px solid rgba(255,255,255,0.4)" onclick="el('reminderBanner').style.display='none'">Dismiss</button>
+</div>
+
 <script>window.MathJax={tex:{inlineMath:[["\\(","\\)"],["$","$" ]],displayMath:[["\\[","\\]"],["$$","$$"]]},options:{skipHtmlTags:["script","noscript","style","textarea","pre","code"]}};</script><script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <div class="grid"><section>
-<div class="card"><h2>Chat with DIV</h2><div id="messages"></div><textarea id="message" placeholder="Ask DIV anything, or try: add task: revise notes"></textarea><div class="row"><button onclick="send()">Send</button><button class="secondary" onclick="record()" id="record">🎙 Record voice</button><label class="hint"><input id="speak" type="checkbox" style="width:auto"> Speak replies</label></div><input id="audio" type="file" accept="audio/*" hidden><audio id="player" controls hidden></audio></div>
-<div class="card"><h2>Add topics or tasks from an image</h2><p class="hint">Upload a syllabus photo, or paste your topics directly in the box.</p><div class="row"><input id="newSubject" placeholder="New subject, e.g. Paper 1"><button onclick="addSubject()">Add subject</button></div><div class="row"><input id="topic" placeholder="Chapter or topic name"><button onclick="addTopic()">Add chapter</button></div><input id="image" type="file" accept="image/png,image/jpeg,.pdf"><button class="secondary" onclick="readImage()">Read image/PDF</button><div id="preview"></div></div>
+<div class="card"><h2>Chat with DIV</h2><div id="messages"></div><textarea id="message" placeholder="Ask DIV anything, or try: remind me at 16:30 to revise"></textarea><div class="row"><button onclick="send()">Send</button><button class="secondary" onclick="record()" id="record">🎙 Record voice</button><label class="hint"><input id="speak" type="checkbox" style="width:auto"> Speak replies</label></div><input id="audio" type="file" accept="audio/*" hidden><audio id="player" controls hidden></audio></div>
+<div class="card"><h2>Add topics or tasks from an image</h2><p class="hint">Upload a syllabus photo, or paste your topics directly in the box.</p><div class="row"><input id="newSubject" placeholder="New subject, e.g. Mathematics"><button onclick="addSubject()">Add subject</button></div><div class="row"><input id="topic" placeholder="Chapter or topic name"><button onclick="addTopic()">Add chapter</button></div><input id="image" type="file" accept="image/png,image/jpeg,.pdf"><button class="secondary" onclick="readImage()">Read image/PDF</button><div id="preview"></div></div>
 </section><aside>
-<div class="card"><h2>Today's tasks</h2><div class="row"><input id="task" placeholder="What do you need to do?"><button onclick="addTask()">Add</button></div><div id="tasks"></div></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <h2 style="margin:0">Today's Timeline & Tasks</h2>
+    <button id="notifBtn" class="secondary" style="font-size:12px;padding:4px 8px;margin:0" onclick="requestNotifPermission()">🔔 Enable Reminders</button>
+  </div>
+  <div class="row" style="margin-bottom:8px;flex-wrap:wrap">
+    <input id="task" placeholder="Task description" style="flex:2;min-width:160px">
+    <input id="taskTime" type="time" title="Set timeline reminder time" style="max-width:125px">
+    <button onclick="addTask()">Add</button>
+  </div>
+  <div id="tasks"></div>
+</div>
 <div class="card"><h2>Topic checklist</h2><label for="subjectSelect">Subject</label><select id="subjectSelect" onchange="selectSubject()"></select><p id="subjectCaption" class="hint"></p><div id="topics"></div><p id="progress" class="hint"></p></div>
-<div class="card"><h2>Make a plan with DIV</h2><p class="hint">Enter topics on separate lines. Leave blank to plan from your unchecked topics.</p><textarea id="planTopics" placeholder="Paste the topics you need to cover"></textarea><label for="planDays">How many days do you have?</label><input id="planDays" type="number" min="1" max="365" value="7"><button onclick="makePlan()">Create my plan</button><div id="planOutput"></div></div>
+<div class="card"><h2>Make a plan with DIV</h2><p class="hint">Enter topics on separate lines. Leave blank to plan from your unchecked topics.</p><textarea id="planTopics" placeholder="Paste the topics you need to cover"></textarea><label for="planWeak" class="hint" style="display:block;margin-top:6px;font-weight:600">Topics you are weak in / need extra focus on (optional):</label><textarea id="planWeak" placeholder="e.g. Inverses, Eigenvalues, or 'I struggle with word problems'" style="min-height:56px"></textarea><label for="planDays">How many days do you have?</label><input id="planDays" type="number" min="1" max="365" value="7"><button onclick="makePlan()">Create my plan</button><div id="planOutput"></div></div>
 <div class="card"><h2>Log today's work</h2><textarea id="work" placeholder="What did you work on today?"></textarea><button onclick="logWork()">Save daily log</button><div id="logs"></div></div>
 </aside></div></div></main>
 
@@ -304,13 +345,115 @@ body{font:16px system-ui,sans-serif;background:var(--bg);color:var(--text);margi
 <script>
 let currentData = {subjects:[], topics:[], tasks:[], daily_log:[]};
 function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem('divTheme',theme);el('themeToggle').textContent=theme==='dark'?'Switch to light mode':'Switch to dark mode'}
-function toggleTheme(){applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark')}
-async function authenticate(action){let username=el('username').value.trim(),password=el('password').value;try{let result=await api('/api/'+action,{username,password});el('authMessage').textContent='';el('password').value='';el('currentUsername').textContent=result.username;el('loginPanel').hidden=true;el('dashboard').hidden=false;refresh()}catch(e){el('authMessage').textContent=e.message}}
-async function startApp(){try{let user=await api('/api/me');el('currentUsername').textContent=user.username;el('loginPanel').hidden=true;el('dashboard').hidden=false;refresh()}catch(e){el('dashboard').hidden=true;el('loginPanel').hidden=false}}
+function toggleTheme(){applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark')}\nasync function authenticate(action){let username=el('username').value.trim(),password=el('password').value;try{let result=await api('/api/'+action,{username,password});el('authMessage').textContent='';el('password').value='';el('currentUsername').textContent=result.username;el('loginPanel').hidden=true;el('dashboard').hidden=false;refresh()}catch(e){el('authMessage').textContent=e.message}}
+async function startApp(){try{let user=await api('/api/me');el('currentUsername').textContent=user.username;el('loginPanel').hidden=true;el('dashboard').hidden=false;updateNotifButton();refresh()}catch(e){el('dashboard').hidden=true;el('loginPanel').hidden=false}}
 async function logout(){await api('/api/logout',{});el('dashboard').hidden=true;el('loginPanel').hidden=false;el('password').value='';el('authMessage').textContent='You are signed out.'}
 async function api(path,body){let r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});let j=await r.json();if(!r.ok)throw Error(j.error||'Something went wrong');return j}
 function el(id){return document.getElementById(id)}
 function addMsg(text,who='assistant'){let d=document.createElement('div');d.className='msg '+(who==='user'?'user':'');d.textContent=text;el('messages').appendChild(d);if(who!=='user'&&window.MathJax?.typesetPromise)window.MathJax.typesetPromise([d]);el('messages').scrollTop=el('messages').scrollHeight}
+
+function playChime(){
+  try{
+    let ctx=new (window.AudioContext||window.webkitAudioContext)();
+    let osc=ctx.createOscillator();
+    let gain=ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type='sine';
+    osc.frequency.setValueAtTime(587.33,ctx.currentTime);
+    osc.frequency.setValueAtTime(880,ctx.currentTime+0.12);
+    gain.gain.setValueAtTime(0.3,ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.6);
+    osc.start();
+    osc.stop(ctx.currentTime+0.6);
+  }catch(e){}
+}
+
+function updateNotifButton(){
+  let btn=el('notifBtn');
+  if(!btn) return;
+  if(!('Notification' in window)){
+    btn.textContent='🔔 No browser alerts';
+    btn.disabled=true;
+  } else if(Notification.permission==='granted'){
+    btn.textContent='🔔 Reminders active';
+    btn.style.borderColor='#4caf50';
+    btn.style.color='#4caf50';
+  } else if(Notification.permission==='denied'){
+    btn.textContent='🔕 Reminders blocked';
+  } else {
+    btn.textContent='🔔 Enable Reminders';
+  }
+}
+
+async function requestNotifPermission(){
+  if(!('Notification' in window)){
+    alert('Browser notifications are not supported in this browser, but in-app banners and audio chimes will still alert you!');
+    return;
+  }
+  let p=await Notification.requestPermission();
+  updateNotifButton();
+  if(p==='granted'){
+    playChime();
+    new Notification('DIV Reminders Active', {body: 'You will receive reminder notifications at scheduled times!'});
+  }
+}
+
+function timeDiffMinutes(t1, t2){
+  if(!t1 || !t2) return 999;
+  let [h1, m1]=t1.split(':').map(Number);
+  let [h2, m2]=t2.split(':').map(Number);
+  return (h2*60 + m2) - (h1*60 + m1);
+}
+
+function triggerReminder(task, origIdx){
+  task.notified=true;
+  api('/api/task/notified',{index:origIdx}).catch(()=>{});
+  playChime();
+  if('Notification' in window && Notification.permission==='granted'){
+    try{
+      new Notification('⏰ DIV Study Reminder', {
+        body: task.title + (task.time ? ` (Scheduled for ${task.time})` : ''),
+        tag: 'div-task-'+origIdx
+      });
+    }catch(e){}
+  }
+  let banner=el('reminderBanner');
+  if(banner){
+    el('reminderBannerText').innerHTML=`⏰ <b>Timeline Reminder (${esc(task.time||'Now')}):</b> ${esc(task.title)}`;
+    banner.style.display='flex';
+  }
+  if('speechSynthesis' in window && el('speak')?.checked){
+    try{
+      let utt=new SpeechSynthesisUtterance(`Reminder: Time to work on ${task.title}`);
+      utt.lang='en-IN';
+      window.speechSynthesis.speak(utt);
+    }catch(e){}
+  }
+  refresh();
+}
+
+function checkReminders(){
+  if(!currentData || !currentData.tasks) return;
+  let now=new Date();
+  let currentH=String(now.getHours()).padStart(2,'0');
+  let currentM=String(now.getMinutes()).padStart(2,'0');
+  let currentTimeStr=`${currentH}:${currentM}`;
+  let todayStr=currentData.today || now.toISOString().slice(0,10);
+
+  currentData.tasks.forEach((task, idx) => {
+    if(!task.done && !task.notified && task.time && task.day===todayStr){
+      let diff=timeDiffMinutes(task.time, currentTimeStr);
+      if(diff>=0 && diff<=15){
+        triggerReminder(task, idx);
+      } else if(diff>15){
+        task.notified=true;
+        api('/api/task/notified',{index:idx}).catch(()=>{});
+      }
+    }
+  });
+}
+setInterval(checkReminders, 10000);
 
 let modalCallback = null;
 function openInputModal(title, val, onConfirm){
@@ -362,13 +505,32 @@ async function refresh(){
   let active=selector.value,visible=d.topics.map((t,i)=>({t,i})).filter(x=>active==='__all'||x.t.subject===active);
   el('subjectCaption').textContent=active==='__all'?'All subjects':active;
   el('topics').innerHTML=visible.map(x=>topicNode(x.t,[x.i])).join('')||'<p class="hint">No chapters for this subject yet. Add a chapter above.</p>';
-  let todayTasks=d.tasks.filter(t=>t.day===d.today);
+  
+  let todayTasks=d.tasks.map((t,origIdx)=>({...t,origIdx})).filter(t=>t.day===d.today);
+  todayTasks.sort((a,b)=>{
+    if(a.time && b.time) return a.time.localeCompare(b.time);
+    if(a.time) return -1;
+    if(b.time) return 1;
+    return a.origIdx - b.origIdx;
+  });
+
   let hasCompleted=todayTasks.some(t=>t.done);
-  el('tasks').innerHTML=todayTasks.map(t=>`<div class="item row" style="justify-content:space-between"><label><input style="width:auto" type="checkbox" ${t.done?'checked':''} onchange="toggleTask(${d.tasks.indexOf(t)},this.checked)"> <span class="${t.done?'done':''}">${esc(t.title)}</span></label><button class="secondary" style="font-size:12px;padding:3px 7px;margin:0" onclick="removeTask(${d.tasks.indexOf(t)})" title="Delete task">✕</button></div>`).join('')+(hasCompleted?`<button class="secondary" style="font-size:13px;width:100%;margin-top:8px" onclick="clearCompletedTasks()">Clear completed tasks</button>`:'')||'<p class="hint">No tasks yet.</p>';
+  el('tasks').innerHTML=todayTasks.map(t=>{
+    let timeBadge=t.time?`<span style="background:var(--soft);color:var(--soft-text);padding:2px 7px;border-radius:6px;font-size:12px;margin-right:6px;font-weight:600">⏰ ${esc(t.time)}</span>`:'';
+    let notifiedBadge=(t.notified && !t.done)?`<span title="Reminder triggered" style="font-size:11px;color:#e67e22;margin-right:4px">🔔</span>`:'';
+    return `<div class="item row" style="justify-content:space-between">
+      <label style="display:flex;align-items:center;flex-wrap:wrap">
+        <input style="width:auto;margin-right:8px" type="checkbox" ${t.done?'checked':''} onchange="toggleTask(${t.origIdx},this.checked)">
+        ${timeBadge}${notifiedBadge}<span class="${t.done?'done':''}">${esc(t.title)}</span>
+      </label>
+      <button class="secondary" style="font-size:12px;padding:3px 7px;margin:0" onclick="removeTask(${t.origIdx})" title="Delete task">✕</button>
+    </div>`;
+  }).join('')+(hasCompleted?`<button class="secondary" style="font-size:13px;width:100%;margin-top:8px" onclick="clearCompletedTasks()">Clear completed tasks</button>`:'')||'<p class="hint">No tasks scheduled for today yet.</p>';
+  
   let counts=topicCounts(visible.map(x=>x.t));
   el('progress').textContent=`${counts.done} of ${counts.total} items completed`;
   el('logs').innerHTML=d.daily_log.slice(-3).reverse().map(x=>`<div class="item"><b>${esc(x.day)}</b> ${esc(x.text)}</div>`).join('');
-  el('planOutput').innerHTML=d.plan?`<p class="hint">${d.plan.days}-day plan · ${d.plan.topics.length} topics</p><div class="item" style="white-space:pre-wrap">${esc(d.plan.text)}</div>`:'<p class="hint">Your saved plan will appear here.</p>';
+  el('planOutput').innerHTML=d.plan?`<p class="hint">${d.plan.days}-day plan · ${d.plan.topics.length} topics${d.plan.weak?' · Focus: <b>'+esc(d.plan.weak)+'</b>':''}</p><div class="item" style="white-space:pre-wrap">${esc(d.plan.text)}</div>`:'<p class="hint">Your saved plan will appear here.</p>';
 }
 
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -385,7 +547,18 @@ async function addTopic(){
   el('topic').value='';
   refresh();
 }
-async function addTask(){let title=el('task').value.trim();if(!title)return;await api('/api/task',{title});el('task').value='';refresh()}
+async function addTask(){
+  let title=el('task').value.trim();
+  if(!title) return;
+  let timeVal=el('taskTime')?el('taskTime').value:'';
+  await api('/api/task',{title, time:timeVal});
+  el('task').value='';
+  if(el('taskTime')) el('taskTime').value='';
+  refresh();
+  if('Notification' in window && Notification.permission==='default'){
+    Notification.requestPermission().then(updateNotifButton);
+  }
+}
 async function removeTask(index){await api('/api/task/remove',{index});refresh()}
 async function clearCompletedTasks(){await api('/api/task/clear-completed',{});refresh()}
 
@@ -436,7 +609,20 @@ async function removeTopic(path){
 async function toggleTopic(path,done){await api('/api/topic/done',{path,done});refresh()}
 async function toggleTask(index,done){await api('/api/task/done',{index,done});refresh()}
 async function logWork(){let text=el('work').value.trim();if(!text)return;await api('/api/log',{text});el('work').value='';refresh()}
-async function makePlan(){let days=Number(el('planDays').value);if(!Number.isInteger(days)||days<1||days>365){addMsg('Enter a number of days from 1 to 365.');return}let topics=el('planTopics').value.split(/\n+/).map(x=>x.trim()).filter(Boolean);el('planOutput').textContent='Building your plan with DIV…';try{let p=await api('/api/plan',{days,topics});el('planOutput').innerHTML=`<p class="hint">${p.days}-day plan · ${p.topics.length} topics</p><div class="item" style="white-space:pre-wrap">${esc(p.text)}</div>`;refresh()}catch(e){el('planOutput').textContent=e.message}}
+async function makePlan(){
+  let days=Number(el('planDays').value);
+  if(!Number.isInteger(days)||days<1||days>365){addMsg('Enter a number of days from 1 to 365.');return}
+  let topics=el('planTopics').value.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  let weak=el('planWeak')?el('planWeak').value.trim():'';
+  el('planOutput').textContent='Building your tailored plan with DIV…';
+  try{
+    let p=await api('/api/plan',{days,topics,weak});
+    el('planOutput').innerHTML=`<p class="hint">${p.days}-day plan · ${p.topics.length} topics${p.weak?' · Special focus on: <b>'+esc(p.weak)+'</b>':''}</p><div class="item" style="white-space:pre-wrap">${esc(p.text)}</div>`;
+    refresh();
+  }catch(e){
+    el('planOutput').textContent=e.message;
+  }
+}
 async function send(){let message=el('message').value.trim();if(!message)return;el('message').value='';addMsg(message,'user');try{let r=await api('/api/chat',{message,subject:el('subjectSelect').value});addMsg(r.reply);if(el('speak').checked){let a=await api('/api/speak',{text:r.reply.slice(0,2400)});el('player').src='data:audio/wav;base64,'+a.audio;el('player').hidden=false;el('player').play()};refresh()}catch(e){addMsg(e.message)}}
 el('message').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}})
 let recorder, chunks=[];async function record(){if(recorder&&recorder.state==='recording'){recorder.stop();el('record').textContent='🎙 Record voice';return}try{let stream=await navigator.mediaDevices.getUserMedia({audio:true});recorder=new MediaRecorder(stream);chunks=[];recorder.ondataavailable=e=>chunks.push(e.data);recorder.onstop=async()=>{let blob=new Blob(chunks,{type:recorder.mimeType});let reader=new FileReader();reader.onload=async()=>{let base64=reader.result.split(',')[1];try{let r=await api('/api/voice',{mime:blob.type,data:base64});el('message').value=r.transcript;send()}catch(e){addMsg(e.message)}};reader.readAsDataURL(blob);stream.getTracks().forEach(t=>t.stop())};recorder.start();el('record').textContent='Stop recording'}catch(e){addMsg('Allow microphone access to use voice input.')}}
@@ -657,7 +843,17 @@ class Handler(BaseHTTPRequestHandler):
                 del items[index]
                 save_data(data); result = {"ok": True}
             elif path == "/api/task":
-                data["tasks"].append({"title": request["title"], "day": time.strftime("%Y-%m-%d"), "done": False})
+                title = str(request.get("title", "")).strip()
+                time_val = str(request.get("time", "")).strip()
+                if not time_val:
+                    title, time_val = extract_time_and_clean_title(title)
+                data["tasks"].append({
+                    "title": title,
+                    "time": time_val,
+                    "day": time.strftime("%Y-%m-%d"),
+                    "done": False,
+                    "notified": False
+                })
                 save_data(data); result = {"ok": True}
             elif path == "/api/task/remove":
                 index = request.get("index")
@@ -666,6 +862,11 @@ class Handler(BaseHTTPRequestHandler):
                 save_data(data); result = {"ok": True}
             elif path == "/api/task/clear-completed":
                 data["tasks"] = [t for t in data["tasks"] if not t.get("done")]
+                save_data(data); result = {"ok": True}
+            elif path == "/api/task/notified":
+                index = request.get("index")
+                if isinstance(index, int) and 0 <= index < len(data["tasks"]):
+                    data["tasks"][index]["notified"] = True
                 save_data(data); result = {"ok": True}
             elif path == "/api/topic/done":
                 indexes = request.get("path", [request.get("index")])
@@ -710,16 +911,47 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(days, int) or days < 1 or days > 365:
                     raise ValueError("Choose a number of days from 1 to 365.")
                 topics = [str(item).strip() for item in request.get("topics", []) if str(item).strip()]
+                weak = str(request.get("weak", "")).strip()
                 if not topics:
                     topics = pending_topic_titles(data["topics"])
                 if not topics:
                     raise ValueError("Paste your topics or add chapters first.")
                 topic_list = "\n".join(f"- {topic}" for topic in topics)
+                
+                weak_prompt = ""
+                if weak:
+                    weak_prompt = (
+                        f"\nSTUDENT'S SPECIFIC WEAK AREAS:\n"
+                        f"The student explicitly flagged: \"{weak}\".\n"
+                        f"- YOU MUST prioritize these weak areas: allocate extra time/days, breakdown core fundamentals step-by-step, assign double practice problems, and schedule repeated spaced review specifically for them.\n"
+                        f"- Explicitly indicate in the daily focus/outcome that special remedial attention is being given to these weak areas.\n"
+                    )
+                
+                system_content = (
+                    "You are DIV, an expert academic planner and tutor. Create a structured, rigorous day-by-day study schedule covering the topics provided.\n"
+                    "CRITICAL RULES:\n"
+                    "1. Phase titles and Day titles must ACCURATELY match the actual subject/topics taught on those days. E.g. If teaching Matrices, the Phase title MUST be 'Matrices' or 'Linear Algebra'. NEVER use the word 'Integration' unless the topic is actual Calculus Integration.\n"
+                    "2. Do NOT use the word 'integration' as a generic buzzword for combining or reviewing topics.\n"
+                    "3. Do NOT output orientation summaries, meta-rules, or prompt disclaimers. Begin immediately with '### Phase 1: [Accurate Phase Name] (Days 1–X)'.\n"
+                    "4. For each day, include:\n"
+                    "   **Day X — Focus:** [Topic]\n"
+                    "   **Timeline:** [Suggested study blocks, e.g. 09:00-11:00 Foundations, 15:00-16:30 Practice, 19:30-20:00 Recall]\n"
+                    "   **Outcome:** [Specific learning goal]\n"
+                    "   **Practice:** [Concrete exercises or problem counts]\n"
+                    "   **Review:** [Spaced recall / key points to remember]\n"
+                    "5. Respect logical prerequisites."
+                    + weak_prompt
+                )
+                
+                user_content = f"Days available: {days}\nTopics to cover:\n{topic_list}"
+                if weak:
+                    user_content += f"\n\nStudent weakness note: {weak}"
+
                 response = client.chat.completions(model="sarvam-105b-conversations", messages=[
-                    {"role": "system", "content": "You are DIV, an expert planner. Create an optimistic, intensive, high-productivity but plausible day-by-day plan that covers every supplied topic within the exact number of days. Group related topics and respect prerequisites. Give each day a clear focus, a concrete learning outcome, problem-solving practice, and short cumulative review. Include spaced recall and a final mixed revision block when the day count allows. Do not mark anything as completed. Keep the plan concise and actionable."},
-                    {"role": "user", "content": f"Days available: {days}\nTopics to cover:\n{topic_list}"},
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_content},
                 ])
-                plan = {"days": days, "topics": topics, "text": response.choices[0].message.content}
+                plan = {"days": days, "topics": topics, "weak": weak, "text": response.choices[0].message.content}
                 data["plan"] = plan
                 save_data(data)
                 result = plan
@@ -728,9 +960,17 @@ class Handler(BaseHTTPRequestHandler):
                 lower = message.casefold()
                 task_prefixes = ("add task:", "add to-do:", "add todo:", "remind me to ")
                 if lower.startswith(task_prefixes):
-                    title = message.split(":", 1)[1].strip() if ":" in message else message[len("remind me to "):].strip()
-                    data["tasks"].append({"title": title, "day": time.strftime("%Y-%m-%d"), "done": False})
-                    save_data(data); result = {"reply": f"Added to today's tasks: {title}"}
+                    raw_title = message.split(":", 1)[1].strip() if ":" in message else message[len("remind me to "):].strip()
+                    title, time_val = extract_time_and_clean_title(raw_title)
+                    data["tasks"].append({
+                        "title": title,
+                        "time": time_val,
+                        "day": time.strftime("%Y-%m-%d"),
+                        "done": False,
+                        "notified": False
+                    })
+                    time_info = f" with reminder at {time_val} ⏰" if time_val else ""
+                    save_data(data); result = {"reply": f"Added to today's timeline: {title}{time_info}"}
                 elif lower.startswith("add topic:"):
                     title = message.split(":", 1)[1].strip()
                     subject = str(request.get("subject", "General")).strip()
@@ -745,7 +985,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     context = json.dumps(data, ensure_ascii=False)
                     response = client.chat.completions(model="sarvam-105b-conversations", messages=[
-                        {"role": "system", "content": "You are DIV, a friendly AI tutor and daily-work assistant. Answer questions clearly, step by step, with a simple example when useful. Use the saved topics below to tailor your explanation. If the subject or question is unclear, ask a short follow-up. Treat unchecked topics as still to do and checked topics as completed; when asked what to work on next, recommend an unchecked topic. Also answer questions about tasks and progress. You can save items when the message starts with 'add task:', 'add topic:', or 'log work:'. Never claim an item was saved unless the app confirms it. Keep replies concise.\nSaved data: " + context},
+                        {"role": "system", "content": "You are DIV, a friendly AI tutor and daily-work assistant. Answer questions clearly, step by step, with a simple example when useful. Use the saved topics and timeline tasks below to tailor your explanation. If the subject or question is unclear, ask a short follow-up. Treat unchecked topics as still to do and checked topics as completed; when asked what to work on next, recommend an unchecked topic. Also answer questions about tasks and progress. You can save items when the message starts with 'add task:', 'add topic:', or 'log work:'. Never claim an item was saved unless the app confirms it. Keep replies concise.\nSaved data: " + context},
                         {"role": "user", "content": message},
                     ])
                     result = {"reply": response.choices[0].message.content}
