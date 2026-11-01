@@ -9,6 +9,8 @@ import secrets
 import time
 import threading
 import urllib.request
+import urllib.error
+from urllib.parse import urlencode
 import zipfile
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,21 +25,48 @@ DATA_FILE = DATA_DIR / "data.json"
 ACCOUNTS_FILE = DATA_DIR / "accounts.json"
 USER_DATA_DIR = DATA_DIR / "user_data"
 REQUEST_CONTEXT = threading.local()
-SESSIONS = {}
-SESSION_LOCK = threading.Lock()
 ACCOUNT_LOCK = threading.Lock()
 SESSION_SECONDS = 7 * 24 * 60 * 60
 KEY_FILE = ROOT / ".env"
 if KEY_FILE.exists():
     for line in KEY_FILE.read_text(encoding="utf-8-sig").splitlines():
         name, sep, value = line.partition("=")
-        if sep and name.strip() == "SARVAM_API_KEY" and value.strip():
+        if sep and name.strip():
             os.environ.setdefault(name.strip(), value.strip())
 if not os.environ.get("SARVAM_API_KEY"):
     raise SystemExit("Add SARVAM_API_KEY to .env before starting the app.")
+if os.environ.get("VERCEL") and not os.environ.get("SESSION_SECRET"):
+    raise SystemExit("Add SESSION_SECRET to the Vercel environment variables.")
 
 client = SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
+SESSION_SECRET = os.environ.get("SESSION_SECRET") or secrets.token_urlsafe(32)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+if bool(SUPABASE_URL) != bool(SUPABASE_SERVICE_ROLE_KEY):
+    raise SystemExit("Set both SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, or neither.")
 DEFAULT_DATA = {"subjects": [], "topics": [], "tasks": [], "daily_log": [], "study_plan": None}
+
+
+def supabase_request(table, method="GET", query="", body=None, prefer=None):
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    if query:
+        url += f"?{query}"
+    payload = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    request = urllib.request.Request(url, data=payload, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as error:
+        error.read()
+        raise RuntimeError(f"Study database request failed ({error.code}).") from None
+    return json.loads(raw) if raw else None
 
 
 def user_data_path(user_id):
@@ -57,6 +86,16 @@ def normalize_data(data):
 
 def load_data():
     user_id = getattr(REQUEST_CONTEXT, "user_id", None)
+    if SUPABASE_URL:
+        if not user_id:
+            return copy.deepcopy(DEFAULT_DATA)
+        rows = supabase_request(
+            "study_data",
+            query=urlencode({"select": "value", "user_id": f"eq.{user_id}", "limit": "1"}),
+        )
+        if rows:
+            return normalize_data(rows[0].get("value") or copy.deepcopy(DEFAULT_DATA))
+        return copy.deepcopy(DEFAULT_DATA)
     path = user_data_path(user_id) if user_id else DATA_FILE
     if not path.exists():
         return copy.deepcopy(DEFAULT_DATA)
@@ -70,11 +109,29 @@ def save_data(data):
     user_id = getattr(REQUEST_CONTEXT, "user_id", None)
     if not user_id:
         raise RuntimeError("Sign in before saving study data.")
+    if SUPABASE_URL:
+        supabase_request(
+            "study_data",
+            method="POST",
+            query="on_conflict=user_id",
+            body={"user_id": user_id, "value": data},
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+        return
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     user_data_path(user_id).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_accounts():
+    if SUPABASE_URL:
+        rows = supabase_request(
+            "study_accounts",
+            query="select=username_key,user_id,username,salt,password_hash&limit=1000",
+        )
+        return {"users": {row["username_key"]: {
+            "id": row["user_id"], "username": row["username"], "salt": row["salt"],
+            "password_hash": row["password_hash"],
+        } for row in rows}}
     if not ACCOUNTS_FILE.exists():
         return {"users": {}}
     try:
@@ -85,7 +142,33 @@ def load_accounts():
 
 
 def save_accounts(accounts):
+    if SUPABASE_URL:
+        raise RuntimeError("Cloud accounts must be created individually.")
     ACCOUNTS_FILE.write_text(json.dumps(accounts, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def create_account(username_key, user):
+    if SUPABASE_URL:
+        rows = supabase_request(
+            "study_accounts",
+            method="POST",
+            query="on_conflict=username_key",
+            body={
+                "username_key": username_key,
+                "user_id": user["id"],
+                "username": user["username"],
+                "salt": user["salt"],
+                "password_hash": user["password_hash"],
+            },
+            prefer="resolution=ignore-duplicates,return=representation",
+        )
+        return bool(rows)
+    accounts = load_accounts()
+    if username_key in accounts["users"]:
+        return False
+    accounts["users"][username_key] = user
+    save_accounts(accounts)
+    return True
 
 
 def password_hash(password, salt):
@@ -197,20 +280,28 @@ class Handler(BaseHTTPRequestHandler):
     def current_user(self):
         cookie = self.headers.get("Cookie", "")
         token = next((part.strip().partition("=")[2] for part in cookie.split(";") if part.strip().startswith("study_session=")), "")
-        with SESSION_LOCK:
-            session = SESSIONS.get(token)
-            if not session:
+        try:
+            encoded, signature = token.split(".", 1)
+            expected = base64.urlsafe_b64encode(
+                hmac.new(SESSION_SECRET.encode(), encoded.encode(), hashlib.sha256).digest()
+            ).decode().rstrip("=")
+            if not hmac.compare_digest(signature, expected):
                 return None
+            padded = encoded + "=" * (-len(encoded) % 4)
+            session = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
             if session["expires"] <= time.time():
-                SESSIONS.pop(token, None)
                 return None
             return {"id": session["id"], "username": session["username"]}
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return None
 
     def set_session(self, user):
-        token = secrets.token_urlsafe(32)
-        with SESSION_LOCK:
-            SESSIONS[token] = {**user, "expires": time.time() + SESSION_SECONDS}
-        secure = "; Secure" if os.environ.get("PUBLIC_HTTPS") == "1" else ""
+        payload = json.dumps({**user, "expires": time.time() + SESSION_SECONDS}, separators=(",", ":")).encode()
+        encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+        signature = hmac.new(SESSION_SECRET.encode(), encoded.encode(), hashlib.sha256).digest()
+        token = encoded + "." + base64.urlsafe_b64encode(signature).decode().rstrip("=")
+        is_https = os.environ.get("PUBLIC_HTTPS") == "1" or self.headers.get("x-forwarded-proto") == "https"
+        secure = "; Secure" if is_https else ""
         return {"Set-Cookie": f"study_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_SECONDS}{secure}"}
 
     def handle_login(self, request):
@@ -239,17 +330,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             user = {"id": uuid.uuid4().hex, "username": username, "salt": secrets.token_bytes(16).hex()}
             user["password_hash"] = password_hash(password, bytes.fromhex(user["salt"]))
-            first_user = not accounts["users"]
-            accounts["users"][key] = user
-            save_accounts(accounts)
-        USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-        destination = user_data_path(user["id"])
-        if first_user and DATA_FILE.exists():
-            try:
-                initial_data = normalize_data(json.loads(DATA_FILE.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
-                initial_data = copy.deepcopy(DEFAULT_DATA)
-            destination.write_text(json.dumps(initial_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            if not create_account(key, user):
+                self.send_json({"error": "That username is already taken."}, 409)
+                return
+        if not SUPABASE_URL:
+            USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
         headers = self.set_session({"id": user["id"], "username": username})
         self.send_json({"username": username}, extra_headers=headers)
 
@@ -291,10 +376,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_register(request)
                 return
             if self.path == "/api/logout":
-                user = self.current_user()
-                token = next((part.strip().partition("=")[2] for part in self.headers.get("Cookie", "").split(";") if part.strip().startswith("study_session=")), "")
-                with SESSION_LOCK:
-                    SESSIONS.pop(token, None)
                 self.send_json({"ok": True}, extra_headers={"Set-Cookie": "study_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"})
                 return
             user = self.current_user()

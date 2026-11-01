@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+.vercel/
 data.json
 accounts.json
 user_data/
