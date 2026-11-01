@@ -199,28 +199,32 @@ def pending_topic_titles(topics):
     return pending
 
 
-def clean_latex(text):
+def clean_extracted_text(text):
     if not text:
         return ""
-    # Convert double-backslash line breaks to newlines
+    # Strip <style> and <script> tags completely along with their CSS contents
+    text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<script[\s\S]*?</script>', '', text, flags=re.IGNORECASE)
+    # Convert block tags to line breaks
+    text = re.sub(r'</?(?:p|div|h[1-6]|li|tr|br|td|th)[^>]*>', '\n', text, flags=re.IGNORECASE)
+    # Strip all remaining HTML tags
+    text = re.sub(r'<[^>]+>', ' ', text)
+    # Strip LaTeX commands and symbols
     text = re.sub(r'\\\\', '\n', text)
-    # Remove \begin{...} and \end{...} blocks
     text = re.sub(r'\\(begin|end)\{[^}]*\}', '', text)
-    # Extract text from \text{...}, \textbf{...}, \textit{...}, etc.
     text = re.sub(r'\\(?:text|textbf|textit|mathrm|mathbf|emph|underline)\{([^}]*)\}', r'\1', text)
-    # Remove remaining LaTeX commands like \hline, \quad, etc.
     text = re.sub(r'\\[a-zA-Z]+', ' ', text)
-    # Replace table column dividers with newlines or spaces
-    text = re.sub(r'[|&]', '\n', text)
-    # Remove math delimiters and stray braces
     text = re.sub(r'[\$\(\)\[\]\{\}]', '', text)
-    # Clean whitespace and strip empty lines
+    text = re.sub(r'[|&]', '\n', text)
+    # Unescape HTML entities
+    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
+    
     cleaned_lines = []
     for line in text.splitlines():
         line = re.sub(r'\s+', ' ', line).strip()
-        # Remove bullet markers
-        line = re.sub(r'^[-*•]\s*', '', line).strip()
-        if line and len(line) > 1 and not line.startswith('#'):
+        line = re.sub(r'^[-*•\d.)\s]+', '', line).strip()
+        # Filter out stray CSS remnants or empty lines
+        if line and len(line) > 1 and not any(skip in line for skip in ('!important', 'margin:', 'padding:', '{', '}')):
             cleaned_lines.append(line)
     return '\n'.join(cleaned_lines)
 
@@ -268,7 +272,7 @@ def parse_image(filename, mime, encoded):
                     except Exception:
                         pass
 
-    return clean_latex(raw_text)
+    return clean_extracted_text(raw_text)
 
 
 PAGE = r'''<!doctype html>
@@ -398,16 +402,21 @@ let recorder, chunks=[];async function record(){if(recorder&&recorder.state==='r
 
 function fileToBase64(file){return new Promise((resolve,reject)=>{let r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(file)})}
 
-function cleanClientText(t){
-  return t.replace(/\\\\/g,'\n')
-          .replace(/\\(begin|end)\{[^}]*\}/g,'')
-          .replace(/\\(?:text|textbf|textit|mathrm|mathbf|emph|underline)\{([^}]*)\}/g,'$1')
-          .replace(/\\[a-zA-Z]+/g,' ')
-          .replace(/[|&]/g,'\n')
-          .replace(/[\$\(\)\[\]\{\}]/g,'')
-          .split('\n')
-          .map(l=>l.replace(/^[-*•\d.)\s]+/,'').trim())
-          .filter(l=>l.length>1)
+function cleanHtmlAndLatex(t){
+  if(!t) return '';
+  t = t.replace(/<style[\s\S]*?<\/style>/gi, '');
+  t = t.replace(/<script[\s\S]*?<\/script>/gi, '');
+  t = t.replace(/<\/?(?:p|div|h[1-6]|li|tr|br|td|th)[^>]*>/gi, '\n');
+  t = t.replace(/<[^>]+>/g, ' ');
+  t = t.replace(/\\\\/g, '\n')
+       .replace(/\\(?:text|textbf|textit|mathrm|mathbf|emph|underline)\{([^}]*)\}/g, '$1')
+       .replace(/\\(begin|end)\{[^}]*\}/g, '')
+       .replace(/\\[a-zA-Z]+/g, ' ')
+       .replace(/[\$\(\)\[\]\{\}]/g, '');
+  t = t.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  return t.split('\n')
+          .map(l => l.replace(/^[-*•\d.)\s]+/, '').trim())
+          .filter(l => l.length > 1 && !l.includes('{') && !l.includes('!important') && !l.includes('margin:'))
           .join('\n');
 }
 
@@ -418,8 +427,8 @@ async function readImage(){
   try{
     let base64=await fileToBase64(f);
     let r=await api('/api/image',{filename:f.name,mime:f.type||'image/png',data:base64});
-    let text=cleanClientText(r.text||'');
-    el('preview').innerHTML='<p>Review or edit your extracted topics below:</p><textarea id="parsed" style="min-height:140px">'+esc(text)+'</textarea><div class="row"><button class="secondary" type="button" onclick="el(\'parsed\').value=cleanClientText(el(\'parsed\').value)">Clean LaTeX formatting</button></div><select id="importType"><option value="topics">Topics</option><option value="tasks">Today’s tasks</option></select><button onclick="saveParsed()">Save to list</button>';
+    let text=cleanHtmlAndLatex(r.text||'');
+    el('preview').innerHTML='<p>Review or edit your extracted topics below:</p><textarea id="parsed" style="min-height:140px">'+esc(text)+'</textarea><div class="row"><button class="secondary" type="button" onclick="el(\'parsed\').value=cleanHtmlAndLatex(el(\'parsed\').value)">Clean up formatting</button></div><select id="importType"><option value="topics">Topics</option><option value="tasks">Today’s tasks</option></select><button onclick="saveParsed()">Save to list</button>';
   }catch(e){
     el('preview').innerHTML='<p class="hint" style="color:#d9534f">Scan failed ('+esc(e.message)+'). You can paste your topics directly below:</p><textarea id="parsed" style="min-height:140px" placeholder="Art and Culture&#10;Indian History&#10;World History"></textarea><select id="importType"><option value="topics">Topics</option><option value="tasks">Today’s tasks</option></select><button onclick="saveParsed()">Save to list</button>';
   }
