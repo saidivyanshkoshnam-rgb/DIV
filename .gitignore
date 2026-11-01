@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+data.json
+accounts.json
+user_data/
+__pycache__/
+*.py[cod]
