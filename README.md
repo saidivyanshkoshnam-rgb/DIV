@@ -1,4 +1,4 @@
-# Study & Day
+# DIV
 
 A study planner and assistant for keeping syllabuses, tracking completed topics, planning study days, managing daily tasks, and asking subject questions by chat or voice.
 
