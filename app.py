@@ -366,6 +366,7 @@ PAGE = r'''<!doctype html>
 PAGE = r'''<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DIV</title>
+<link rel="manifest" href="/manifest.json">
 <style>
 :root{color-scheme:light;--bg:#f5f6fa;--surface:#fff;--text:#202434;--border:#e5e7ef;--muted:#666;--soft:#eef0f8;--soft-text:#282b3b;--line:#eee;--bubble:#f2f2fa;--user-bubble:#e8e5ff;--done:#7d8190}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#151821;--surface:#202530;--text:#eceef6;--border:#394150;--muted:#aab0bd;--soft:#343a4a;--soft-text:#f0f1f7;--line:#353b47;--bubble:#2b3040;--user-bubble:#3b3464;--done:#a0a6b3}
@@ -602,6 +603,8 @@ async function refresh(){
   el('progress').textContent=`${counts.done} of ${counts.total} items completed`;
   el('logs').innerHTML=d.daily_log.slice(-3).reverse().map(x=>`<div class="item"><b>${esc(x.day)}</b> ${esc(x.text)}</div>`).join('');
   el('planOutput').innerHTML=d.plan?`<p class="hint">${d.plan.days}-day plan · ${d.plan.topics.length} topics${d.plan.weak?' · Focus: <b>'+esc(d.plan.weak)+'</b>':''}</p><div class="item" style="white-space:pre-wrap">${esc(d.plan.text)}</div>`:'<p class="hint">Your saved plan will appear here.</p>';
+  syncTasksToSW(d);
+
 }
 
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -736,6 +739,46 @@ async function saveParsed(){let kind=el('importType').value,subject=el('subjectS
 
 applyTheme(localStorage.getItem('divTheme')||'light');
 startApp();
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').then(reg => {
+    console.log('DIV SW registered');
+  }).catch(err => console.warn('SW registration failed:', err));
+
+  navigator.serviceWorker.addEventListener('message', async event => {
+    if(event.data && event.data.type === 'SW_NOTIFIED'){
+      let idx = event.data.idx;
+      if(currentData && currentData.tasks && currentData.tasks[idx]){
+        let task = currentData.tasks[idx];
+        await api('/api/task/notified', {index: idx}).catch(()=>{});
+        playChime();
+        let aiMsg = '';
+        try{
+          let r = await api('/api/reminder-msg', {title: task.title, time: task.time||''});
+          aiMsg = r.message || '';
+        }catch(e){}
+        let banner = el('reminderBanner');
+        if(banner){
+          el('reminderBannerText').innerHTML =
+            `⏰ <b>Reminder (${esc(task.time||'Now')}):</b> ${esc(task.title)}`
+            + (aiMsg ? `<br><span style="font-size:13px;opacity:0.92;margin-top:4px;display:block">${esc(aiMsg)}</span>` : '');
+          banner.style.display = 'flex';
+        }
+        refresh();
+      }
+    }
+  });
+}
+
+function syncTasksToSW(data){
+  if('serviceWorker' in navigator && navigator.serviceWorker.controller){
+    navigator.serviceWorker.controller.postMessage({
+      type: 'SET_TASKS',
+      tasks: (data.tasks||[]).map(t => ({...t, swNotified: t.notified||false})),
+      today: data.today || new Date().toISOString().slice(0,10)
+    });
+  }
+}
 </script></html>'''
 
 
@@ -1072,8 +1115,23 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/speak":
                 audio = client.text_to_speech.convert(text=request["text"], language_code="en-IN", model="bulbul:v4-flash")
                 result = {"audio": audio.audios[0]}
-            else:
-                self.send_json({"error": "Not found"}, 404); return
+        elif self.path == "/sw.js":
+            payload = SW_JS.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Service-Worker-Allowed", "/")
+            self.end_headers()
+            self.wfile.write(payload)
+        elif self.path == "/manifest.json":
+            payload = MANIFEST_JSON.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/manifest+json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        else:
+            self.send_json({"error": "Not found"}, 404); return
             self.send_json(result)
         except Exception as error:
             self.send_json({"error": str(error)}, 500)
